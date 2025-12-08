@@ -294,7 +294,14 @@ install_php() {
         php$php_version-xmlrpc php$php_version-curl php$php_version-gd php$php_version-imagick \
         php$php_version-cli php$php_version-dev php$php_version-imap php$php_version-mbstring \
         php$php_version-opcache php$php_version-soap php$php_version-zip php$php_version-intl \
-        php$php_version-bcmath libapache2-mod-php$php_version php-pear -y
+        php$php_version-bcmath php-pear -y
+    
+    # Only install Apache PHP module if Apache is selected
+    if [ "$INSTALL_APACHE" = true ]; then
+        print_step "Installing Apache PHP module..."
+        sudo NEEDRESTART_MODE=a apt install libapache2-mod-php$php_version -y
+    fi
+    
     sudo NEEDRESTART_MODE=a apt install autoconf g++ make openssl libssl3 libssl-dev \
         libcurl4-openssl-dev pkg-config libsasl2-dev libpcre3-dev -y
     
