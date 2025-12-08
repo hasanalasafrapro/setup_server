@@ -379,7 +379,8 @@ install_mongodb() {
     
     # MongoDB version selection
     echo -e "${CYAN}Select MongoDB version to install:${NC}"
-    local mongo_versions=("8.2 (Latest)" "8.0" "7.0" "6.0" "5.0" "Custom")
+    echo -e "${YELLOW}Note: MongoDB 8.2 may not be available for all Ubuntu versions yet.${NC}"
+    local mongo_versions=("8.0 (Recommended)" "8.2 (Latest)" "7.0" "6.0" "5.0" "Custom")
     
     for i in "${!mongo_versions[@]}"; do
         echo "  $((i+1))) MongoDB ${mongo_versions[$i]}"
@@ -436,15 +437,61 @@ install_mongodb() {
     fi
     
     print_step "Adding MongoDB repository for version $mongodb_version..."
-    curl -fsSL https://www.mongodb.org/static/pgp/server-$mongodb_version.asc | sudo gpg --dearmor -o /usr/share/keyrings/mongodb-server-$mongodb_version.gpg --yes
+    
+    # Remove any existing MongoDB GPG key and list files for this version
+    sudo rm -f /usr/share/keyrings/mongodb-server-$mongodb_version.gpg
+    sudo rm -f /etc/apt/sources.list.d/mongodb-org-$mongodb_version.list
+    
+    # Import GPG key using the recommended method
+    curl -fsSL https://www.mongodb.org/static/pgp/server-$mongodb_version.asc | \
+        sudo gpg --dearmor -o /usr/share/keyrings/mongodb-server-$mongodb_version.gpg
+    
+    # Check if GPG key was imported successfully
+    if [ ! -f /usr/share/keyrings/mongodb-server-$mongodb_version.gpg ]; then
+        print_error "Failed to import MongoDB GPG key."
+        return 1
+    fi
+    
+    # Set proper permissions
+    sudo chmod 644 /usr/share/keyrings/mongodb-server-$mongodb_version.gpg
+    
+    # Add the repository
     echo "deb [ arch=amd64,arm64 signed-by=/usr/share/keyrings/mongodb-server-$mongodb_version.gpg ] https://repo.mongodb.org/apt/ubuntu $ubuntu_codename/mongodb-org/$mongodb_version multiverse" | sudo tee /etc/apt/sources.list.d/mongodb-org-$mongodb_version.list
     
-    sudo apt update
+    print_step "Updating package list..."
+    if ! sudo apt update 2>&1 | tee /tmp/apt_update.log; then
+        # Check if the error is related to MongoDB repository
+        if grep -q "NO_PUBKEY\|not signed\|does not have a Release file" /tmp/apt_update.log; then
+            print_error "MongoDB $mongodb_version repository is not available for Ubuntu $ubuntu_codename."
+            print_warning "This version may not support your Ubuntu release yet."
+            
+            # Clean up the broken repository
+            sudo rm -f /etc/apt/sources.list.d/mongodb-org-$mongodb_version.list
+            sudo rm -f /usr/share/keyrings/mongodb-server-$mongodb_version.gpg
+            
+            # Offer fallback to 8.0
+            if [ "$mongodb_version" != "8.0" ]; then
+                if prompt_yes_no "Would you like to try MongoDB 8.0 instead?"; then
+                    mongodb_version="8.0"
+                    # Recursive call with 8.0
+                    install_mongodb
+                    return $?
+                fi
+            fi
+            
+            print_error "MongoDB installation skipped."
+            return 1
+        fi
+    fi
     
     # Check if mongodb-org package is available
     if ! apt-cache show mongodb-org >/dev/null 2>&1; then
         print_error "MongoDB package not found. The version may not support Ubuntu $ubuntu_codename."
         print_warning "Try a different MongoDB version or check https://www.mongodb.com/docs/manual/installation/"
+        
+        # Clean up
+        sudo rm -f /etc/apt/sources.list.d/mongodb-org-$mongodb_version.list
+        sudo rm -f /usr/share/keyrings/mongodb-server-$mongodb_version.gpg
         return 1
     fi
     
