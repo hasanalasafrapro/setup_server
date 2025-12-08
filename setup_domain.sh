@@ -252,6 +252,83 @@ EOF
     echo "$config_file"
 }
 
+create_apache_angular_config() {
+    local domain="$1"
+    local doc_root="$2"
+    local config_file="/etc/apache2/sites-available/${domain}.conf"
+    
+    sudo tee "$config_file" > /dev/null << EOF
+<VirtualHost *:80>
+    ServerName ${domain}
+    ServerAlias www.${domain}
+    DocumentRoot ${doc_root}
+    
+    <Directory ${doc_root}>
+        Options -Indexes +FollowSymLinks
+        AllowOverride All
+        Require all granted
+        
+        # Angular routing - fallback to index.html
+        RewriteEngine On
+        RewriteBase /
+        RewriteRule ^index\.html$ - [L]
+        RewriteCond %{REQUEST_FILENAME} !-f
+        RewriteCond %{REQUEST_FILENAME} !-d
+        RewriteRule . /index.html [L]
+    </Directory>
+    
+    # Cache static assets
+    <FilesMatch "\.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)$">
+        Header set Cache-Control "public, max-age=31536000, immutable"
+    </FilesMatch>
+    
+    # Deny access to hidden files
+    <FilesMatch "^\.">
+        Require all denied
+    </FilesMatch>
+    
+    ErrorLog \${APACHE_LOG_DIR}/${domain}-error.log
+    CustomLog \${APACHE_LOG_DIR}/${domain}-access.log combined
+</VirtualHost>
+EOF
+    
+    echo "$config_file"
+}
+
+create_apache_angular_ssr_config() {
+    local domain="$1"
+    local proxy_port="$2"
+    local proxy_host="${3:-localhost}"
+    local config_file="/etc/apache2/sites-available/${domain}.conf"
+    
+    sudo tee "$config_file" > /dev/null << EOF
+<VirtualHost *:80>
+    ServerName ${domain}
+    ServerAlias www.${domain}
+    
+    ProxyPreserveHost On
+    ProxyPass / http://${proxy_host}:${proxy_port}/
+    ProxyPassReverse / http://${proxy_host}:${proxy_port}/
+    
+    # WebSocket support
+    RewriteEngine On
+    RewriteCond %{HTTP:Upgrade} websocket [NC]
+    RewriteCond %{HTTP:Connection} upgrade [NC]
+    RewriteRule ^/?(.*) "ws://${proxy_host}:${proxy_port}/\$1" [P,L]
+    
+    # Cache static assets
+    <LocationMatch "\.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)$">
+        Header set Cache-Control "public, max-age=31536000, immutable"
+    </LocationMatch>
+    
+    ErrorLog \${APACHE_LOG_DIR}/${domain}-error.log
+    CustomLog \${APACHE_LOG_DIR}/${domain}-access.log combined
+</VirtualHost>
+EOF
+    
+    echo "$config_file"
+}
+
 # =============================================================================
 # Nginx Configuration Functions
 # =============================================================================
@@ -463,6 +540,144 @@ EOF
     echo "$config_file"
 }
 
+create_nginx_nuxtjs_config() {
+    local domain="$1"
+    local proxy_port="$2"
+    local proxy_host="${3:-localhost}"
+    local config_file="/etc/nginx/sites-available/${domain}"
+    
+    sudo tee "$config_file" > /dev/null << EOF
+server {
+    listen 80;
+    listen [::]:80;
+    
+    server_name ${domain} www.${domain};
+    
+    # Gzip compression
+    gzip on;
+    gzip_types text/plain text/css application/json application/javascript text/xml application/xml;
+    gzip_min_length 1000;
+    
+    location / {
+        proxy_pass http://${proxy_host}:${proxy_port};
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_cache_bypass \$http_upgrade;
+    }
+    
+    # Nuxt.js static files
+    location /_nuxt/ {
+        proxy_pass http://${proxy_host}:${proxy_port};
+        proxy_cache_valid 60m;
+        add_header Cache-Control "public, immutable";
+    }
+    
+    access_log /var/log/nginx/${domain}-access.log;
+    error_log /var/log/nginx/${domain}-error.log;
+}
+EOF
+    
+    echo "$config_file"
+}
+
+create_nginx_angular_config() {
+    local domain="$1"
+    local doc_root="$2"
+    local config_file="/etc/nginx/sites-available/${domain}"
+    
+    sudo tee "$config_file" > /dev/null << EOF
+server {
+    listen 80;
+    listen [::]:80;
+    
+    server_name ${domain} www.${domain};
+    root ${doc_root};
+    index index.html;
+    
+    # Gzip compression
+    gzip on;
+    gzip_types text/plain text/css application/json application/javascript text/xml application/xml;
+    gzip_min_length 1000;
+    
+    # Angular routing - serve index.html for all routes
+    location / {
+        try_files \$uri \$uri/ /index.html;
+    }
+    
+    # Cache static assets
+    location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)$ {
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+    }
+    
+    # Security headers
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-XSS-Protection "1; mode=block" always;
+    
+    # Deny access to hidden files
+    location ~ /\. {
+        deny all;
+    }
+    
+    access_log /var/log/nginx/${domain}-access.log;
+    error_log /var/log/nginx/${domain}-error.log;
+}
+EOF
+    
+    echo "$config_file"
+}
+
+create_nginx_angular_ssr_config() {
+    local domain="$1"
+    local proxy_port="$2"
+    local proxy_host="${3:-localhost}"
+    local config_file="/etc/nginx/sites-available/${domain}"
+    
+    sudo tee "$config_file" > /dev/null << EOF
+server {
+    listen 80;
+    listen [::]:80;
+    
+    server_name ${domain} www.${domain};
+    
+    # Gzip compression
+    gzip on;
+    gzip_types text/plain text/css application/json application/javascript text/xml application/xml;
+    gzip_min_length 1000;
+    
+    location / {
+        proxy_pass http://${proxy_host}:${proxy_port};
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_cache_bypass \$http_upgrade;
+    }
+    
+    # Angular SSR static assets
+    location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)$ {
+        proxy_pass http://${proxy_host}:${proxy_port};
+        proxy_cache_valid 60m;
+        add_header Cache-Control "public, immutable";
+    }
+    
+    access_log /var/log/nginx/${domain}-access.log;
+    error_log /var/log/nginx/${domain}-error.log;
+}
+EOF
+    
+    echo "$config_file"
+}
+
 # =============================================================================
 # SSL Functions
 # =============================================================================
@@ -537,9 +752,12 @@ setup_domain() {
     echo "  2) PHP Application"
     echo "  3) Laravel/Symfony (PHP Framework)"
     echo "  4) Node.js/Express (Reverse Proxy)"
-    echo "  5) Next.js/Nuxt.js (SSR Framework)"
-    echo "  6) Custom Reverse Proxy"
-    read -rp "Enter your choice (1-6): " app_type
+    echo "  5) Next.js (SSR Framework)"
+    echo "  6) Nuxt.js (SSR Framework)"
+    echo "  7) Angular (Static SPA)"
+    echo "  8) Angular SSR (Server-Side Rendering)"
+    echo "  9) Custom Reverse Proxy"
+    read -rp "Enter your choice (1-9): " app_type
     
     local config_file=""
     local doc_root=""
@@ -606,7 +824,7 @@ setup_domain() {
             fi
             ;;
         5)
-            # Next.js/Nuxt.js
+            # Next.js
             prompt_for_input "Enter application port" proxy_port "3000"
             prompt_for_input "Enter proxy host" proxy_host "localhost"
             
@@ -617,6 +835,38 @@ setup_domain() {
             fi
             ;;
         6)
+            # Nuxt.js
+            prompt_for_input "Enter application port" proxy_port "3000"
+            prompt_for_input "Enter proxy host" proxy_host "localhost"
+            
+            if [ "$web_server" = "apache" ]; then
+                config_file=$(create_apache_proxy_config "$domain_name" "$proxy_port" "$proxy_host")
+            else
+                config_file=$(create_nginx_nuxtjs_config "$domain_name" "$proxy_port" "$proxy_host")
+            fi
+            ;;
+        7)
+            # Angular Static SPA
+            prompt_for_input "Enter document root path (dist folder)" doc_root "/var/www/${domain_name}"
+            
+            if [ "$web_server" = "apache" ]; then
+                config_file=$(create_apache_angular_config "$domain_name" "$doc_root")
+            else
+                config_file=$(create_nginx_angular_config "$domain_name" "$doc_root")
+            fi
+            ;;
+        8)
+            # Angular SSR
+            prompt_for_input "Enter application port" proxy_port "4000"
+            prompt_for_input "Enter proxy host" proxy_host "localhost"
+            
+            if [ "$web_server" = "apache" ]; then
+                config_file=$(create_apache_angular_ssr_config "$domain_name" "$proxy_port" "$proxy_host")
+            else
+                config_file=$(create_nginx_angular_ssr_config "$domain_name" "$proxy_port" "$proxy_host")
+            fi
+            ;;
+        9)
             # Custom Proxy
             prompt_for_input "Enter backend port" proxy_port
             prompt_for_input "Enter backend host" proxy_host "localhost"
