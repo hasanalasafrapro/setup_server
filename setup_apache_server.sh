@@ -18,6 +18,8 @@ INSTALL_NGINX=false
 INSTALL_MYSQL=false
 INSTALL_PHP=false
 INSTALL_MONGODB=false
+INSTALL_MONGODB_DOCKER=false
+INSTALL_DOCKER=false
 INSTALL_NODEJS=false
 INSTALL_CERTBOT=false
 INSTALL_TOOLS=false
@@ -26,6 +28,7 @@ INSTALL_TOOLS=false
 php_version=""
 mongodb_version=""
 nodejs_version=""
+mongodb_docker_version=""
 
 # =============================================================================
 # Utility Functions
@@ -604,9 +607,204 @@ install_tools() {
     print_success "Additional tools installed successfully!"
 }
 
-# =============================================================================
-# Main Menu
-# =============================================================================
+install_docker() {
+    print_header "Installing Docker"
+    
+    # Check if Docker is already installed
+    if command -v docker &> /dev/null; then
+        print_warning "Docker is already installed."
+        docker --version
+        if prompt_yes_no "Would you like to reinstall/update Docker?"; then
+            print_step "Removing existing Docker installation..."
+            sudo apt remove docker docker-engine docker.io containerd runc -y 2>/dev/null || true
+        else
+            print_success "Keeping existing Docker installation."
+            return 0
+        fi
+    fi
+    
+    print_step "Installing Docker prerequisites..."
+    sudo NEEDRESTART_MODE=a apt install ca-certificates curl gnupg lsb-release -y
+    
+    print_step "Adding Docker GPG key..."
+    sudo mkdir -p /etc/apt/keyrings
+    curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+    sudo chmod a+r /etc/apt/keyrings/docker.gpg
+    
+    print_step "Adding Docker repository..."
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+    
+    print_step "Installing Docker Engine..."
+    sudo apt update
+    sudo NEEDRESTART_MODE=a apt install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin -y
+    
+    print_step "Starting Docker service..."
+    sudo systemctl start docker
+    sudo systemctl enable docker
+    
+    # Add current user to docker group (if not root)
+    if [ "$EUID" -ne 0 ]; then
+        print_step "Adding current user to docker group..."
+        sudo usermod -aG docker $USER
+        print_warning "You may need to log out and back in for group changes to take effect."
+    fi
+    
+    # Verify installation
+    if docker --version &> /dev/null; then
+        print_success "Docker installed successfully!"
+        docker --version
+    else
+        print_error "Docker installation may have failed. Please check manually."
+        return 1
+    fi
+}
+
+install_mongodb_docker() {
+    print_header "Installing MongoDB via Docker"
+    
+    # Check if Docker is installed
+    if ! command -v docker &> /dev/null; then
+        print_warning "Docker is not installed. Installing Docker first..."
+        install_docker
+        if [ $? -ne 0 ]; then
+            print_error "Failed to install Docker. Cannot proceed with MongoDB Docker installation."
+            return 1
+        fi
+    fi
+    
+    # MongoDB version selection for Docker
+    echo -e "${CYAN}Select MongoDB Docker version to install:${NC}"
+    echo -e "${GREEN}Docker images are available for all MongoDB versions!${NC}"
+    local mongo_docker_versions=("8 (Latest)" "7" "6" "5" "4.4" "Custom")
+    
+    for i in "${!mongo_docker_versions[@]}"; do
+        echo "  $((i+1))) MongoDB ${mongo_docker_versions[$i]}"
+    done
+    
+    while true; do
+        read -rp "Enter your choice (1-${#mongo_docker_versions[@]}): " choice
+        if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#mongo_docker_versions[@]}" ]; then
+            if [ "$choice" -eq "${#mongo_docker_versions[@]}" ]; then
+                prompt_for_input "Enter MongoDB version (e.g., 7.0.5)" mongodb_docker_version
+            else
+                mongodb_docker_version=$(echo "${mongo_docker_versions[$((choice-1))]}" | awk '{print $1}')
+            fi
+            break
+        else
+            print_error "Invalid selection."
+        fi
+    done
+    
+    # Configuration options
+    local mongo_port="27017"
+    local mongo_container_name="mongodb"
+    local mongo_data_dir="/var/lib/mongodb-docker"
+    local mongo_root_user=""
+    local mongo_root_pass=""
+    
+    echo ""
+    if prompt_yes_no "Would you like to customize MongoDB Docker configuration?"; then
+        read -rp "Enter MongoDB port (default: 27017): " input_port
+        [ -n "$input_port" ] && mongo_port="$input_port"
+        
+        read -rp "Enter container name (default: mongodb): " input_name
+        [ -n "$input_name" ] && mongo_container_name="$input_name"
+        
+        read -rp "Enter data directory (default: /var/lib/mongodb-docker): " input_dir
+        [ -n "$input_dir" ] && mongo_data_dir="$input_dir"
+    fi
+    
+    if prompt_yes_no "Would you like to set up MongoDB authentication?"; then
+        prompt_for_input "Enter MongoDB root username" mongo_root_user
+        prompt_for_input "Enter MongoDB root password" mongo_root_pass
+    fi
+    
+    print_step "Creating MongoDB data directory..."
+    sudo mkdir -p "$mongo_data_dir"
+    sudo chmod 755 "$mongo_data_dir"
+    
+    print_step "Pulling MongoDB Docker image..."
+    sudo docker pull mongo:$mongodb_docker_version
+    
+    if [ $? -ne 0 ]; then
+        print_error "Failed to pull MongoDB image. Please check the version."
+        return 1
+    fi
+    
+    # Stop and remove existing container if it exists
+    if sudo docker ps -a --format '{{.Names}}' | grep -q "^${mongo_container_name}$"; then
+        print_warning "Container '$mongo_container_name' already exists. Removing..."
+        sudo docker stop "$mongo_container_name" 2>/dev/null || true
+        sudo docker rm "$mongo_container_name" 2>/dev/null || true
+    fi
+    
+    print_step "Starting MongoDB container..."
+    if [ -n "$mongo_root_user" ] && [ -n "$mongo_root_pass" ]; then
+        sudo docker run -d \
+            --name "$mongo_container_name" \
+            --restart unless-stopped \
+            -p "$mongo_port":27017 \
+            -v "$mongo_data_dir":/data/db \
+            -e MONGO_INITDB_ROOT_USERNAME="$mongo_root_user" \
+            -e MONGO_INITDB_ROOT_PASSWORD="$mongo_root_pass" \
+            mongo:$mongodb_docker_version
+    else
+        sudo docker run -d \
+            --name "$mongo_container_name" \
+            --restart unless-stopped \
+            -p "$mongo_port":27017 \
+            -v "$mongo_data_dir":/data/db \
+            mongo:$mongodb_docker_version
+    fi
+    
+    if [ $? -ne 0 ]; then
+        print_error "Failed to start MongoDB container."
+        return 1
+    fi
+    
+    # Wait for MongoDB to be ready
+    print_step "Waiting for MongoDB to be ready..."
+    sleep 5
+    
+    # Verify MongoDB is running
+    if sudo docker ps --format '{{.Names}}' | grep -q "^${mongo_container_name}$"; then
+        print_success "MongoDB Docker container is running!"
+        echo ""
+        echo -e "${CYAN}MongoDB Docker Information:${NC}"
+        echo "  Container Name: $mongo_container_name"
+        echo "  Port: $mongo_port"
+        echo "  Data Directory: $mongo_data_dir"
+        echo "  Version: mongo:$mongodb_docker_version"
+        if [ -n "$mongo_root_user" ]; then
+            echo "  Root Username: $mongo_root_user"
+            echo "  Connection String: mongodb://$mongo_root_user:<password>@localhost:$mongo_port"
+        else
+            echo "  Connection String: mongodb://localhost:$mongo_port"
+        fi
+        echo ""
+        echo -e "${YELLOW}Useful Docker commands:${NC}"
+        echo "  View logs: docker logs $mongo_container_name"
+        echo "  Stop: docker stop $mongo_container_name"
+        echo "  Start: docker start $mongo_container_name"
+        echo "  Shell: docker exec -it $mongo_container_name mongosh"
+    else
+        print_error "MongoDB container failed to start. Check logs with: docker logs $mongo_container_name"
+        return 1
+    fi
+    
+    # Install PHP MongoDB extension if PHP is installed
+    if [ -n "$php_version" ]; then
+        php_ini_file="/etc/php/$php_version/fpm/php.ini"
+        if [ -f "$php_ini_file" ]; then
+            print_step "Installing PHP MongoDB driver..."
+            add_php_extension "mongodb.so" "$php_ini_file"
+            sudo NEEDRESTART_MODE=a printf "\n" | pecl install -f mongodb
+            sudo systemctl restart php$php_version-fpm
+        fi
+    fi
+    
+    print_success "MongoDB $mongodb_docker_version installed via Docker successfully!"
+}
 
 show_main_menu() {
     print_header "Web Server Setup Script"
@@ -619,15 +817,17 @@ show_main_menu() {
     echo ""
     echo -e "  ${YELLOW}Databases:${NC}"
     echo "  3) MySQL Database Server"
-    echo "  4) MongoDB (with version selection)"
+    echo "  4) MongoDB (native installation)"
+    echo "  5) MongoDB via Docker (recommended for compatibility)"
     echo ""
     echo -e "  ${YELLOW}Languages & Runtimes:${NC}"
-    echo "  5) PHP (with version selection)"
-    echo "  6) Node.js (with version selection)"
+    echo "  6) PHP (with version selection)"
+    echo "  7) Node.js (with version selection)"
     echo ""
-    echo -e "  ${YELLOW}Utilities:${NC}"
-    echo "  7) Certbot (SSL Certificates)"
-    echo "  8) Additional Tools (git, curl, zip, etc.)"
+    echo -e "  ${YELLOW}Containers & Utilities:${NC}"
+    echo "  8) Docker"
+    echo "  9) Certbot (SSL Certificates)"
+    echo "  10) Additional Tools (git, curl, zip, etc.)"
     echo ""
     echo "  A) Install ALL components (Apache + all others)"
     echo "  N) Install ALL components (Nginx + all others)"
@@ -652,13 +852,29 @@ custom_selection() {
     
     echo -e "\n${YELLOW}Databases:${NC}"
     prompt_yes_no "Install MySQL Database Server?" && INSTALL_MYSQL=true
-    prompt_yes_no "Install MongoDB?" && INSTALL_MONGODB=true
+    
+    # MongoDB installation choice
+    if prompt_yes_no "Install MongoDB?"; then
+        echo -e "${CYAN}How would you like to install MongoDB?${NC}"
+        echo "  1) Native installation (direct on system)"
+        echo "  2) Docker installation (recommended for compatibility)"
+        read -rp "Enter your choice (1-2): " mongo_choice
+        case "$mongo_choice" in
+            1) INSTALL_MONGODB=true ;;
+            2) INSTALL_MONGODB_DOCKER=true ;;
+            *) 
+                print_warning "Invalid choice. Defaulting to Docker installation."
+                INSTALL_MONGODB_DOCKER=true
+                ;;
+        esac
+    fi
     
     echo -e "\n${YELLOW}Languages & Runtimes:${NC}"
     prompt_yes_no "Install PHP?" && INSTALL_PHP=true
     prompt_yes_no "Install Node.js?" && INSTALL_NODEJS=true
     
-    echo -e "\n${YELLOW}Utilities:${NC}"
+    echo -e "\n${YELLOW}Containers & Utilities:${NC}"
+    prompt_yes_no "Install Docker?" && INSTALL_DOCKER=true
     prompt_yes_no "Install Certbot (SSL)?" && INSTALL_CERTBOT=true
     prompt_yes_no "Install Additional Tools?" && INSTALL_TOOLS=true
 }
@@ -671,7 +887,9 @@ show_selection_summary() {
     [ "$INSTALL_APACHE" = true ] && echo -e "  ${GREEN}✔${NC} Apache (HTTPD) Web Server"
     [ "$INSTALL_NGINX" = true ] && echo -e "  ${GREEN}✔${NC} Nginx Web Server"
     [ "$INSTALL_MYSQL" = true ] && echo -e "  ${GREEN}✔${NC} MySQL Database Server"
-    [ "$INSTALL_MONGODB" = true ] && echo -e "  ${GREEN}✔${NC} MongoDB"
+    [ "$INSTALL_MONGODB" = true ] && echo -e "  ${GREEN}✔${NC} MongoDB (native)"
+    [ "$INSTALL_MONGODB_DOCKER" = true ] && echo -e "  ${GREEN}✔${NC} MongoDB (Docker)"
+    [ "$INSTALL_DOCKER" = true ] && echo -e "  ${GREEN}✔${NC} Docker"
     [ "$INSTALL_PHP" = true ] && echo -e "  ${GREEN}✔${NC} PHP"
     [ "$INSTALL_NODEJS" = true ] && echo -e "  ${GREEN}✔${NC} Node.js"
     [ "$INSTALL_CERTBOT" = true ] && echo -e "  ${GREEN}✔${NC} Certbot"
@@ -686,11 +904,14 @@ run_installation() {
     print_step "Updating package list..."
     sudo apt update
     
+    [ "$INSTALL_DOCKER" = true ] && install_docker
+    
     [ "$INSTALL_APACHE" = true ] && install_apache
     [ "$INSTALL_NGINX" = true ] && install_nginx
     [ "$INSTALL_MYSQL" = true ] && install_mysql
     [ "$INSTALL_PHP" = true ] && install_php
     [ "$INSTALL_MONGODB" = true ] && install_mongodb
+    [ "$INSTALL_MONGODB_DOCKER" = true ] && install_mongodb_docker
     [ "$INSTALL_NODEJS" = true ] && install_nodejs
     [ "$INSTALL_CERTBOT" = true ] && install_certbot
     [ "$INSTALL_TOOLS" = true ] && install_tools
@@ -727,6 +948,8 @@ run_installation() {
     [ "$INSTALL_MYSQL" = true ] && echo "  MySQL: $(mysql --version 2>/dev/null)"
     [ "$INSTALL_PHP" = true ] && echo "  PHP: $(php -v 2>/dev/null | head -1)"
     [ "$INSTALL_MONGODB" = true ] && echo "  MongoDB: $(mongod --version 2>/dev/null | head -1)"
+    [ "$INSTALL_MONGODB_DOCKER" = true ] && echo "  MongoDB (Docker): Running in container"
+    [ "$INSTALL_DOCKER" = true ] && echo "  Docker: $(docker --version 2>/dev/null)"
     [ "$INSTALL_NODEJS" = true ] && echo "  Node.js: $(node -v 2>/dev/null)"
     echo ""
 }
@@ -759,22 +982,29 @@ main() {
                 INSTALL_MONGODB=true
                 ;;
             5)
-                INSTALL_PHP=true
+                INSTALL_MONGODB_DOCKER=true
                 ;;
             6)
-                INSTALL_NODEJS=true
+                INSTALL_PHP=true
                 ;;
             7)
-                INSTALL_CERTBOT=true
+                INSTALL_NODEJS=true
                 ;;
             8)
+                INSTALL_DOCKER=true
+                ;;
+            9)
+                INSTALL_CERTBOT=true
+                ;;
+            10)
                 INSTALL_TOOLS=true
                 ;;
             [Aa])
                 INSTALL_APACHE=true
                 INSTALL_MYSQL=true
                 INSTALL_PHP=true
-                INSTALL_MONGODB=true
+                INSTALL_MONGODB_DOCKER=true
+                INSTALL_DOCKER=true
                 INSTALL_NODEJS=true
                 INSTALL_CERTBOT=true
                 INSTALL_TOOLS=true
@@ -783,7 +1013,8 @@ main() {
                 INSTALL_NGINX=true
                 INSTALL_MYSQL=true
                 INSTALL_PHP=true
-                INSTALL_MONGODB=true
+                INSTALL_MONGODB_DOCKER=true
+                INSTALL_DOCKER=true
                 INSTALL_NODEJS=true
                 INSTALL_CERTBOT=true
                 INSTALL_TOOLS=true
@@ -802,7 +1033,7 @@ main() {
         esac
         
         # If a single component was selected, ask if user wants to add more
-        if [[ "$main_choice" =~ ^[1-8]$ ]]; then
+        if [[ "$main_choice" =~ ^([1-9]|10)$ ]]; then
             if prompt_yes_no "Would you like to select additional components?"; then
                 continue
             fi
