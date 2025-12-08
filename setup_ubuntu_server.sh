@@ -1287,6 +1287,262 @@ run_installation() {
     [ "$INSTALL_NODEJS" = true ] && echo "  Node.js: $(node -v 2>/dev/null)"
     echo ""
 }
+
+# =============================================================================
+# Interactive Menu Functions
+# =============================================================================
+
+show_main_menu() {
+    clear
+    print_header "Ubuntu Server Setup - Interactive Menu"
+    
+    echo -e "${CYAN}Select components to install:${NC}\n"
+    echo "  1) Apache Web Server"
+    echo "  2) Nginx Web Server"
+    echo "  3) MySQL Database"
+    echo "  4) PostgreSQL Database"
+    echo "  5) MongoDB (Native)"
+    echo "  6) MongoDB (Docker)"
+    echo "  7) Redis"
+    echo "  8) PHP"
+    echo "  9) Node.js"
+    echo "  10) Docker"
+    echo "  11) Certbot (SSL)"
+    echo "  12) Development Tools"
+    echo ""
+    echo -e "${CYAN}Quick Install Options:${NC}"
+    echo "  A) LAMP Stack (Apache + MySQL + PHP + Tools)"
+    echo "  N) LEMP Stack (Nginx + MySQL + PHP + Tools)"
+    echo "  C) Custom Selection (multi-select)"
+    echo ""
+    echo -e "${CYAN}Other Options:${NC}"
+    echo "  T) Show Server Status"
+    echo "  W) Configure Swap"
+    echo "  R) Remove Components"
+    echo "  Q) Quit"
+    echo ""
+    
+    # Show current selections if any
+    local has_selections=false
+    for var in INSTALL_APACHE INSTALL_NGINX INSTALL_MYSQL INSTALL_POSTGRESQL \
+               INSTALL_MONGODB INSTALL_MONGODB_DOCKER INSTALL_REDIS INSTALL_PHP \
+               INSTALL_NODEJS INSTALL_DOCKER INSTALL_CERTBOT INSTALL_TOOLS; do
+        if [ "${!var}" = true ]; then
+            has_selections=true
+            break
+        fi
+    done
+    
+    if [ "$has_selections" = true ]; then
+        echo -e "${GREEN}Current selections:${NC}"
+        [ "$INSTALL_APACHE" = true ] && echo "  ✔ Apache"
+        [ "$INSTALL_NGINX" = true ] && echo "  ✔ Nginx"
+        [ "$INSTALL_MYSQL" = true ] && echo "  ✔ MySQL"
+        [ "$INSTALL_POSTGRESQL" = true ] && echo "  ✔ PostgreSQL"
+        [ "$INSTALL_MONGODB" = true ] && echo "  ✔ MongoDB (Native)"
+        [ "$INSTALL_MONGODB_DOCKER" = true ] && echo "  ✔ MongoDB (Docker)"
+        [ "$INSTALL_REDIS" = true ] && echo "  ✔ Redis"
+        [ "$INSTALL_PHP" = true ] && echo "  ✔ PHP"
+        [ "$INSTALL_NODEJS" = true ] && echo "  ✔ Node.js"
+        [ "$INSTALL_DOCKER" = true ] && echo "  ✔ Docker"
+        [ "$INSTALL_CERTBOT" = true ] && echo "  ✔ Certbot"
+        [ "$INSTALL_TOOLS" = true ] && echo "  ✔ Dev Tools"
+        echo ""
+        echo -e "${YELLOW}Press Enter to proceed with installation, or select more components.${NC}"
+        echo ""
+    fi
+}
+
+show_selection_summary() {
+    print_header "Installation Summary"
+    
+    echo -e "${CYAN}The following components will be installed:${NC}\n"
+    
+    local count=0
+    [ "$INSTALL_APACHE" = true ] && { echo "  • Apache Web Server"; ((count++)); }
+    [ "$INSTALL_NGINX" = true ] && { echo "  • Nginx Web Server"; ((count++)); }
+    [ "$INSTALL_MYSQL" = true ] && { echo "  • MySQL Database"; ((count++)); }
+    [ "$INSTALL_POSTGRESQL" = true ] && { echo "  • PostgreSQL Database"; ((count++)); }
+    [ "$INSTALL_MONGODB" = true ] && { echo "  • MongoDB (Native)"; ((count++)); }
+    [ "$INSTALL_MONGODB_DOCKER" = true ] && { echo "  • MongoDB (Docker)"; ((count++)); }
+    [ "$INSTALL_REDIS" = true ] && { echo "  • Redis"; ((count++)); }
+    [ "$INSTALL_PHP" = true ] && { echo "  • PHP"; ((count++)); }
+    [ "$INSTALL_NODEJS" = true ] && { echo "  • Node.js"; ((count++)); }
+    [ "$INSTALL_DOCKER" = true ] && { echo "  • Docker"; ((count++)); }
+    [ "$INSTALL_CERTBOT" = true ] && { echo "  • Certbot (SSL)"; ((count++)); }
+    [ "$INSTALL_TOOLS" = true ] && { echo "  • Development Tools"; ((count++)); }
+    
+    if [ $count -eq 0 ]; then
+        echo -e "${YELLOW}  No components selected.${NC}"
+        return 1
+    fi
+    
+    echo ""
+    echo -e "${CYAN}Total: $count component(s)${NC}\n"
+}
+
+custom_selection() {
+    print_header "Custom Component Selection"
+    
+    echo -e "${CYAN}Toggle components (enter number to toggle, 'done' when finished):${NC}\n"
+    
+    while true; do
+        echo "  1) [$([ "$INSTALL_APACHE" = true ] && echo "X" || echo " ")] Apache"
+        echo "  2) [$([ "$INSTALL_NGINX" = true ] && echo "X" || echo " ")] Nginx"
+        echo "  3) [$([ "$INSTALL_MYSQL" = true ] && echo "X" || echo " ")] MySQL"
+        echo "  4) [$([ "$INSTALL_POSTGRESQL" = true ] && echo "X" || echo " ")] PostgreSQL"
+        echo "  5) [$([ "$INSTALL_MONGODB" = true ] && echo "X" || echo " ")] MongoDB (Native)"
+        echo "  6) [$([ "$INSTALL_MONGODB_DOCKER" = true ] && echo "X" || echo " ")] MongoDB (Docker)"
+        echo "  7) [$([ "$INSTALL_REDIS" = true ] && echo "X" || echo " ")] Redis"
+        echo "  8) [$([ "$INSTALL_PHP" = true ] && echo "X" || echo " ")] PHP"
+        echo "  9) [$([ "$INSTALL_NODEJS" = true ] && echo "X" || echo " ")] Node.js"
+        echo "  10) [$([ "$INSTALL_DOCKER" = true ] && echo "X" || echo " ")] Docker"
+        echo "  11) [$([ "$INSTALL_CERTBOT" = true ] && echo "X" || echo " ")] Certbot"
+        echo "  12) [$([ "$INSTALL_TOOLS" = true ] && echo "X" || echo " ")] Dev Tools"
+        echo ""
+        
+        read -rp "Enter number (or 'done'): " choice
+        
+        case "$choice" in
+            1) [ "$INSTALL_APACHE" = true ] && INSTALL_APACHE=false || INSTALL_APACHE=true ;;
+            2) [ "$INSTALL_NGINX" = true ] && INSTALL_NGINX=false || INSTALL_NGINX=true ;;
+            3) [ "$INSTALL_MYSQL" = true ] && INSTALL_MYSQL=false || INSTALL_MYSQL=true ;;
+            4) [ "$INSTALL_POSTGRESQL" = true ] && INSTALL_POSTGRESQL=false || INSTALL_POSTGRESQL=true ;;
+            5) [ "$INSTALL_MONGODB" = true ] && INSTALL_MONGODB=false || INSTALL_MONGODB=true ;;
+            6) [ "$INSTALL_MONGODB_DOCKER" = true ] && INSTALL_MONGODB_DOCKER=false || INSTALL_MONGODB_DOCKER=true ;;
+            7) [ "$INSTALL_REDIS" = true ] && INSTALL_REDIS=false || INSTALL_REDIS=true ;;
+            8) [ "$INSTALL_PHP" = true ] && INSTALL_PHP=false || INSTALL_PHP=true ;;
+            9) [ "$INSTALL_NODEJS" = true ] && INSTALL_NODEJS=false || INSTALL_NODEJS=true ;;
+            10) [ "$INSTALL_DOCKER" = true ] && INSTALL_DOCKER=false || INSTALL_DOCKER=true ;;
+            11) [ "$INSTALL_CERTBOT" = true ] && INSTALL_CERTBOT=false || INSTALL_CERTBOT=true ;;
+            12) [ "$INSTALL_TOOLS" = true ] && INSTALL_TOOLS=false || INSTALL_TOOLS=true ;;
+            done|Done|DONE) break ;;
+            *) print_error "Invalid option" ;;
+        esac
+        echo ""
+    done
+}
+
+run_removal() {
+    print_header "Remove Components"
+    
+    echo -e "${CYAN}Select component to remove:${NC}\n"
+    echo "  1) Apache"
+    echo "  2) Nginx"
+    echo "  3) MySQL"
+    echo "  4) PostgreSQL"
+    echo "  5) MongoDB (Native)"
+    echo "  6) MongoDB (Docker)"
+    echo "  7) Redis"
+    echo "  8) PHP"
+    echo "  9) Node.js"
+    echo "  10) Docker"
+    echo "  11) Certbot"
+    echo "  0) Cancel"
+    echo ""
+    
+    read -rp "Enter choice: " rem_choice
+    
+    case "$rem_choice" in
+        1)
+            if prompt_yes_no "Remove Apache?"; then
+                sudo systemctl stop apache2 2>/dev/null
+                sudo apt purge apache2 apache2-utils -y
+                sudo apt autoremove -y
+                print_success "Apache removed"
+            fi
+            ;;
+        2)
+            if prompt_yes_no "Remove Nginx?"; then
+                sudo systemctl stop nginx 2>/dev/null
+                sudo apt purge nginx nginx-common -y
+                sudo apt autoremove -y
+                print_success "Nginx removed"
+            fi
+            ;;
+        3)
+            if prompt_yes_no "Remove MySQL? WARNING: This will delete all databases!"; then
+                sudo systemctl stop mysql 2>/dev/null
+                sudo apt purge mysql-server mysql-client -y
+                sudo apt autoremove -y
+                print_success "MySQL removed"
+            fi
+            ;;
+        4)
+            if prompt_yes_no "Remove PostgreSQL? WARNING: This will delete all databases!"; then
+                sudo systemctl stop postgresql 2>/dev/null
+                sudo apt purge postgresql* -y
+                sudo apt autoremove -y
+                print_success "PostgreSQL removed"
+            fi
+            ;;
+        5)
+            if prompt_yes_no "Remove MongoDB (Native)? WARNING: This will delete all databases!"; then
+                sudo systemctl stop mongod 2>/dev/null
+                sudo apt purge mongodb-org* -y
+                sudo rm -f /etc/apt/sources.list.d/mongodb-org-*.list
+                sudo rm -f /usr/share/keyrings/mongodb-server-*.gpg
+                sudo apt autoremove -y
+                print_success "MongoDB (Native) removed"
+            fi
+            ;;
+        6)
+            if prompt_yes_no "Remove MongoDB (Docker)? WARNING: This will delete all data!"; then
+                docker stop mongodb 2>/dev/null
+                docker rm mongodb 2>/dev/null
+                docker volume rm mongodb_data 2>/dev/null
+                print_success "MongoDB (Docker) removed"
+            fi
+            ;;
+        7)
+            if prompt_yes_no "Remove Redis?"; then
+                sudo systemctl stop redis 2>/dev/null
+                sudo apt purge redis-server -y
+                sudo apt autoremove -y
+                print_success "Redis removed"
+            fi
+            ;;
+        8)
+            if prompt_yes_no "Remove PHP?"; then
+                sudo apt purge php* -y
+                sudo apt autoremove -y
+                print_success "PHP removed"
+            fi
+            ;;
+        9)
+            if prompt_yes_no "Remove Node.js?"; then
+                sudo apt purge nodejs -y
+                sudo rm -rf /usr/local/lib/node_modules
+                sudo apt autoremove -y
+                print_success "Node.js removed"
+            fi
+            ;;
+        10)
+            if prompt_yes_no "Remove Docker?"; then
+                sudo systemctl stop docker 2>/dev/null
+                sudo apt purge docker-ce docker-ce-cli containerd.io -y
+                sudo apt autoremove -y
+                print_success "Docker removed"
+            fi
+            ;;
+        11)
+            if prompt_yes_no "Remove Certbot?"; then
+                sudo apt purge certbot python3-certbot-* -y
+                sudo apt autoremove -y
+                print_success "Certbot removed"
+            fi
+            ;;
+        0|"")
+            echo "Cancelled"
+            ;;
+        *)
+            print_error "Invalid option"
+            ;;
+    esac
+    
+    read -rp "Press Enter to continue..."
+}
+
 # Main Script Execution
 # =============================================================================
 
