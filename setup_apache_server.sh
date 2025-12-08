@@ -1224,13 +1224,297 @@ EOF
         if [ -f "$php_ini_file" ]; then
             print_step "Installing PHP MongoDB driver..."
             add_php_extension "mongodb.so" "$php_ini_file"
-            sudo NEEDRESTART_MODE=a printf "\n" | pecl install -f mongodb
-            sudo systemctl restart php$php_version-fpm
         fi
     fi
     
-    print_success "MongoDB Replica Set installed successfully!"
+    if ! sudo docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qE "^mongo"; then
+        print_warning "No MongoDB Docker containers found."
+    else
+        print_success "MongoDB Docker containers removed successfully!"
+    fi
 }
+
+uninstall_nodejs() {
+    print_header "Removing Node.js"
+    
+    if ! command -v node &> /dev/null && [ ! -d "$HOME/.nvm" ]; then
+        print_warning "Node.js is not installed."
+        return 0
+    fi
+    
+    print_step "Removing NVM and Node.js..."
+    
+    # Remove NVM
+    if [ -d "$HOME/.nvm" ]; then
+        rm -rf "$HOME/.nvm"
+        
+        # Remove NVM from shell config files
+        for file in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
+            if [ -f "$file" ]; then
+                sed -i '/NVM_DIR/d' "$file"
+                sed -i '/nvm.sh/d' "$file"
+            fi
+        done
+    fi
+    
+    # Remove system-wide Node.js if installed
+    if command -v node &> /dev/null; then
+        sudo apt purge nodejs npm -y 2>/dev/null || true
+        sudo apt autoremove -y
+    fi
+    
+    # Remove PM2
+    if command -v pm2 &> /dev/null; then
+        pm2 kill 2>/dev/null || true
+        npm uninstall -g pm2 2>/dev/null || true
+    fi
+    
+    print_success "Node.js removed successfully!"
+}
+
+uninstall_docker() {
+    print_header "Removing Docker"
+    
+    if ! command -v docker &> /dev/null; then
+        print_warning "Docker is not installed."
+        return 0
+    fi
+    
+    # Check for running containers
+    local running_containers=$(sudo docker ps -q 2>/dev/null | wc -l)
+    if [ "$running_containers" -gt 0 ]; then
+        print_warning "There are $running_containers running Docker containers."
+        if ! prompt_yes_no "Stop all containers and proceed with Docker removal?"; then
+            print_warning "Docker removal cancelled."
+            return 0
+        fi
+        print_step "Stopping all containers..."
+        sudo docker stop $(sudo docker ps -q) 2>/dev/null || true
+    fi
+    
+    print_step "Removing all Docker containers..."
+    sudo docker rm $(sudo docker ps -aq) 2>/dev/null || true
+    
+    if prompt_yes_no "Remove all Docker images?"; then
+        print_step "Removing Docker images..."
+        sudo docker rmi $(sudo docker images -q) 2>/dev/null || true
+    fi
+    
+    if prompt_yes_no "Remove all Docker volumes (data)?"; then
+        print_step "Removing Docker volumes..."
+        sudo docker volume prune -f 2>/dev/null || true
+    fi
+    
+    print_step "Stopping Docker service..."
+    sudo systemctl stop docker 2>/dev/null || true
+    sudo systemctl disable docker 2>/dev/null || true
+    
+    print_step "Removing Docker packages..."
+    sudo apt purge docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin -y
+    sudo apt autoremove -y
+    
+    print_step "Removing Docker configuration..."
+    sudo rm -rf /var/lib/docker
+    sudo rm -rf /var/lib/containerd
+    sudo rm -rf /etc/docker
+    sudo rm -f /etc/apt/sources.list.d/docker.list
+    sudo rm -f /etc/apt/keyrings/docker.gpg
+    
+    print_success "Docker removed successfully!"
+}
+
+uninstall_certbot() {
+    print_header "Removing Certbot"
+    
+    if ! command -v certbot &> /dev/null; then
+        print_warning "Certbot is not installed."
+        return 0
+    fi
+    
+    print_step "Removing Certbot packages..."
+    sudo apt purge certbot python3-certbot-apache python3-certbot-nginx -y
+    sudo apt autoremove -y
+    
+    if prompt_yes_no "Remove SSL certificates and Certbot configuration?"; then
+        sudo rm -rf /etc/letsencrypt
+        print_success "Certbot certificates removed."
+    fi
+    
+    # Remove cron job
+    print_step "Removing Certbot cron job..."
+    sudo crontab -l 2>/dev/null | grep -v "certbot renew" | sudo crontab -
+    
+    print_success "Certbot removed successfully!"
+}
+
+uninstall_tools() {
+    print_header "Removing Additional Tools"
+    
+    print_step "Removing development tools..."
+    sudo apt purge gnupg curl git zip unzip wget htop -y
+    sudo apt autoremove -y
+    
+    print_success "Additional tools removed successfully!"
+}
+
+# =============================================================================
+# Removal Menu Functions
+# =============================================================================
+
+show_removal_menu() {
+    print_header "Remove Components"
+    
+    echo -e "${RED}WARNING: Removal operations may delete data!${NC}\n"
+    echo -e "${CYAN}Select components to remove:${NC}"
+    echo ""
+    echo -e "  ${YELLOW}Web Servers:${NC}"
+    echo "  1) Apache (HTTPD)"
+    echo "  2) Nginx"
+    echo ""
+    echo -e "  ${YELLOW}Databases:${NC}"
+    echo "  3) MySQL"
+    echo "  4) MongoDB (native)"
+    echo "  5) MongoDB (Docker)"
+    echo ""
+    echo -e "  ${YELLOW}Languages & Runtimes:${NC}"
+    echo "  6) PHP"
+    echo "  7) Node.js"
+    echo ""
+    echo -e "  ${YELLOW}Containers & Utilities:${NC}"
+    echo "  8) Docker"
+    echo "  9) Certbot"
+    echo "  10) Additional Tools"
+    echo ""
+    echo -e "  ${RED}X) Remove ALL components${NC}"
+    echo "  S) Select multiple components"
+    echo "  B) Back to main menu"
+    echo ""
+}
+
+run_removal() {
+    while true; do
+        show_removal_menu
+        read -rp "Enter your choice: " removal_choice
+        
+        case "$removal_choice" in
+            1) uninstall_apache ;;
+            2) uninstall_nginx ;;
+            3) uninstall_mysql ;;
+            4) uninstall_mongodb ;;
+            5) uninstall_mongodb_docker ;;
+            6) uninstall_php ;;
+            7) uninstall_nodejs ;;
+            8) uninstall_docker ;;
+            9) uninstall_certbot ;;
+            10) uninstall_tools ;;
+            [Xx])
+                print_header "Remove ALL Components"
+                echo -e "${RED}This will remove ALL installed components and their data!${NC}"
+                if prompt_yes_no "Are you absolutely sure?"; then
+                    uninstall_certbot
+                    uninstall_mongodb_docker
+                    uninstall_mongodb
+                    uninstall_nodejs
+                    uninstall_php
+                    uninstall_mysql
+                    uninstall_nginx
+                    uninstall_apache
+                    uninstall_docker
+                    uninstall_tools
+                    print_success "All components removed!"
+                fi
+                ;;
+            [Ss])
+                selective_removal
+                ;;
+            [Bb])
+                return 0
+                ;;
+            *)
+                print_error "Invalid option."
+                ;;
+        esac
+        
+        echo ""
+        if ! prompt_yes_no "Would you like to remove more components?"; then
+            break
+        fi
+    done
+}
+
+selective_removal() {
+    print_header "Selective Component Removal"
+    
+    echo -e "${CYAN}Select which components to remove (answer y/n for each):${NC}\n"
+    
+    local remove_apache=false
+    local remove_nginx=false
+    local remove_mysql=false
+    local remove_mongodb=false
+    local remove_mongodb_docker=false
+    local remove_php=false
+    local remove_nodejs=false
+    local remove_docker=false
+    local remove_certbot=false
+    local remove_tools=false
+    
+    echo -e "${YELLOW}Web Servers:${NC}"
+    prompt_yes_no "Remove Apache?" && remove_apache=true
+    prompt_yes_no "Remove Nginx?" && remove_nginx=true
+    
+    echo -e "\n${YELLOW}Databases:${NC}"
+    prompt_yes_no "Remove MySQL?" && remove_mysql=true
+    prompt_yes_no "Remove MongoDB (native)?" && remove_mongodb=true
+    prompt_yes_no "Remove MongoDB (Docker)?" && remove_mongodb_docker=true
+    
+    echo -e "\n${YELLOW}Languages & Runtimes:${NC}"
+    prompt_yes_no "Remove PHP?" && remove_php=true
+    prompt_yes_no "Remove Node.js?" && remove_nodejs=true
+    
+    echo -e "\n${YELLOW}Containers & Utilities:${NC}"
+    prompt_yes_no "Remove Docker?" && remove_docker=true
+    prompt_yes_no "Remove Certbot?" && remove_certbot=true
+    prompt_yes_no "Remove Additional Tools?" && remove_tools=true
+    
+    # Show summary
+    print_header "Removal Summary"
+    echo -e "${RED}The following components will be REMOVED:${NC}\n"
+    
+    [ "$remove_apache" = true ] && echo -e "  ${RED}✖${NC} Apache"
+    [ "$remove_nginx" = true ] && echo -e "  ${RED}✖${NC} Nginx"
+    [ "$remove_mysql" = true ] && echo -e "  ${RED}✖${NC} MySQL"
+    [ "$remove_mongodb" = true ] && echo -e "  ${RED}✖${NC} MongoDB (native)"
+    [ "$remove_mongodb_docker" = true ] && echo -e "  ${RED}✖${NC} MongoDB (Docker)"
+    [ "$remove_php" = true ] && echo -e "  ${RED}✖${NC} PHP"
+    [ "$remove_nodejs" = true ] && echo -e "  ${RED}✖${NC} Node.js"
+    [ "$remove_docker" = true ] && echo -e "  ${RED}✖${NC} Docker"
+    [ "$remove_certbot" = true ] && echo -e "  ${RED}✖${NC} Certbot"
+    [ "$remove_tools" = true ] && echo -e "  ${RED}✖${NC} Additional Tools"
+    
+    echo ""
+    if ! prompt_yes_no "Proceed with removal?"; then
+        print_warning "Removal cancelled."
+        return 0
+    fi
+    
+    # Execute removals
+    [ "$remove_certbot" = true ] && uninstall_certbot
+    [ "$remove_mongodb_docker" = true ] && uninstall_mongodb_docker
+    [ "$remove_mongodb" = true ] && uninstall_mongodb
+    [ "$remove_nodejs" = true ] && uninstall_nodejs
+    [ "$remove_php" = true ] && uninstall_php
+    [ "$remove_mysql" = true ] && uninstall_mysql
+    [ "$remove_nginx" = true ] && uninstall_nginx
+    [ "$remove_apache" = true ] && uninstall_apache
+    [ "$remove_docker" = true ] && uninstall_docker
+    [ "$remove_tools" = true ] && uninstall_tools
+    
+    print_success "Selected components removed successfully!"
+}
+
+# =============================================================================
+# Main Menu
+# =============================================================================
 
 show_main_menu() {
     print_header "Web Server Setup Script"
@@ -1258,6 +1542,8 @@ show_main_menu() {
     echo "  A) Install ALL components (Apache + all others)"
     echo "  N) Install ALL components (Nginx + all others)"
     echo "  C) Custom selection"
+    echo ""
+    echo -e "  ${RED}R) Remove components${NC}"
     echo "  Q) Quit"
     echo ""
 }
@@ -1448,8 +1734,12 @@ main() {
             [Cc])
                 custom_selection
                 ;;
+            [Rr])
+                run_removal
+                continue
+                ;;
             [Qq])
-                echo -e "\n${YELLOW}Installation cancelled.${NC}\n"
+                echo -e "\n${YELLOW}Goodbye!${NC}\n"
                 exit 0
                 ;;
             *)
