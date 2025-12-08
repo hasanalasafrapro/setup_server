@@ -857,13 +857,15 @@ install_php() {
     if [ "$INSTALL_APACHE" = false ]; then
         if [ -d "/etc/apache2/mods-enabled" ]; then
             print_step "Cleaning up broken Apache PHP modules..."
-            for phpmod in /etc/apache2/mods-enabled/php*.load 2>/dev/null; do
+            shopt -s nullglob
+            for phpmod in /etc/apache2/mods-enabled/php*.load; do
                 if [ -f "$phpmod" ]; then
                     local modname=$(basename "$phpmod" .load)
                     sudo a2dismod "$modname" 2>/dev/null || true
                     print_warning "Disabled orphan Apache module: $modname"
                 fi
             done
+            shopt -u nullglob
         fi
     fi
     
