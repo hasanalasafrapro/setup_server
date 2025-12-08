@@ -1134,9 +1134,10 @@ install_mongodb() {
     
     print_step "Adding MongoDB repository for version $mongodb_version..."
     
-    # Remove any existing MongoDB GPG key and list files for this version
-    sudo rm -f /usr/share/keyrings/mongodb-server-$mongodb_version.gpg
-    sudo rm -f /etc/apt/sources.list.d/mongodb-org-$mongodb_version.list
+    # Remove ALL existing MongoDB GPG keys and list files (not just the current version)
+    # This prevents conflicts from leftover repositories of different versions
+    sudo rm -f /usr/share/keyrings/mongodb-server-*.gpg
+    sudo rm -f /etc/apt/sources.list.d/mongodb-org-*.list
     
     # Import GPG key using the recommended method
     curl -fsSL https://www.mongodb.org/static/pgp/server-$mongodb_version.asc | \
