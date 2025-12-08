@@ -1203,16 +1203,69 @@ install_mongodb() {
     sudo systemctl start mongod.service
     sudo systemctl enable mongod
     
-    # Install PHP MongoDB extension if PHP is installed
-    if [ -n "$php_version" ]; then
-        php_ini_file="/etc/php/$php_version/fpm/php.ini"
-        print_step "Installing PHP MongoDB driver..."
-        add_php_extension "mongodb.so" "$php_ini_file"
-        sudo NEEDRESTART_MODE=a printf "\n" | pecl install -f mongodb
-        sudo systemctl restart php$php_version-fpm
-    fi
+    # Install PHP MongoDB extension for ALL installed PHP versions
+    install_php_mongodb_extension
     
     print_success "MongoDB $mongodb_version installed successfully!"
+}
+
+install_php_mongodb_extension() {
+    # Find all installed PHP versions
+    local installed_php_versions=()
+    
+    if [ -d /etc/php ]; then
+        for php_dir in /etc/php/*/; do
+            if [ -d "$php_dir" ]; then
+                local ver=$(basename "$php_dir")
+                # Check if it's a valid version directory (has fpm or cli)
+                if [ -d "/etc/php/$ver/fpm" ] || [ -d "/etc/php/$ver/cli" ]; then
+                    installed_php_versions+=("$ver")
+                fi
+            fi
+        done
+    fi
+    
+    # If no PHP versions found, skip
+    if [ ${#installed_php_versions[@]} -eq 0 ]; then
+        print_warning "No PHP installations found. Skipping MongoDB PHP extension."
+        return 0
+    fi
+    
+    print_step "Installing PHP MongoDB extension for ${#installed_php_versions[@]} PHP version(s)..."
+    
+    # Install the MongoDB extension via PECL (only needs to be done once)
+    # Use the default/first PHP version for PECL
+    sudo NEEDRESTART_MODE=a printf "\n" | pecl install -f mongodb 2>/dev/null || true
+    
+    # Add extension to all PHP versions
+    for ver in "${installed_php_versions[@]}"; do
+        print_step "Configuring MongoDB extension for PHP $ver..."
+        
+        # Add to FPM php.ini if exists
+        if [ -f "/etc/php/$ver/fpm/php.ini" ]; then
+            add_php_extension "mongodb.so" "/etc/php/$ver/fpm/php.ini"
+        fi
+        
+        # Add to CLI php.ini if exists
+        if [ -f "/etc/php/$ver/cli/php.ini" ]; then
+            add_php_extension "mongodb.so" "/etc/php/$ver/cli/php.ini"
+        fi
+        
+        # Also add to mods-available for proper module management
+        local mods_dir="/etc/php/$ver/mods-available"
+        if [ -d "$mods_dir" ] && [ ! -f "$mods_dir/mongodb.ini" ]; then
+            echo "extension=mongodb.so" | sudo tee "$mods_dir/mongodb.ini" > /dev/null
+            # Enable the module using phpenmod if available
+            sudo phpenmod -v "$ver" mongodb 2>/dev/null || true
+        fi
+        
+        # Restart PHP-FPM for this version
+        if systemctl is-active --quiet "php$ver-fpm"; then
+            sudo systemctl restart "php$ver-fpm"
+        fi
+    done
+    
+    print_success "MongoDB PHP extension installed for: ${installed_php_versions[*]}"
 }
 
 run_installation() {
