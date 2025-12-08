@@ -1072,6 +1072,59 @@ remove_domain() {
     print_success "Domain ${domain_name} removed!"
 }
 
+issue_ssl_certificate() {
+    print_header "Issue SSL Certificate"
+    
+    local web_server=$(detect_web_server)
+    
+    if [ "$web_server" = "none" ]; then
+        print_error "No web server (Apache or Nginx) is running."
+        return 1
+    fi
+    
+    # If both are installed, ask which one to use
+    if [ "$web_server" = "both" ]; then
+        echo -e "${CYAN}Both Apache and Nginx are running. Which one is serving the domain?${NC}"
+        echo "  1) Apache"
+        echo "  2) Nginx"
+        read -rp "Enter your choice (1-2): " server_choice
+        case "$server_choice" in
+            1) web_server="apache" ;;
+            2) web_server="nginx" ;;
+            *) web_server="nginx" ;;
+        esac
+    fi
+    
+    # Get domain name
+    prompt_for_input "Enter domain name (e.g., example.com)" domain_name
+    domain_name="${domain_name#www.}"
+    
+    # Check if domain is already configured
+    local config_exists=false
+    if [ "$web_server" = "apache" ] && [ -f "/etc/apache2/sites-available/${domain_name}.conf" ]; then
+        config_exists=true
+    elif [ "$web_server" = "nginx" ] && [ -f "/etc/nginx/sites-available/${domain_name}" ]; then
+        config_exists=true
+    fi
+    
+    if [ "$config_exists" = false ]; then
+        print_warning "No virtual host configuration found for ${domain_name}"
+        if ! prompt_yes_no "Continue anyway?" "n"; then
+            return 1
+        fi
+    fi
+    
+    # Check if SSL already exists
+    if [ -d "/etc/letsencrypt/live/${domain_name}" ]; then
+        print_warning "SSL certificate already exists for ${domain_name}"
+        if prompt_yes_no "Renew/reinstall the certificate?" "n"; then
+            setup_ssl "$domain_name" "$web_server"
+        fi
+    else
+        setup_ssl "$domain_name" "$web_server"
+    fi
+}
+
 # =============================================================================
 # Main Menu
 # =============================================================================
@@ -1083,8 +1136,9 @@ show_menu() {
     echo ""
     echo "  1) Setup new domain"
     echo "  2) List configured domains"
-    echo "  3) Remove domain"
-    echo "  4) Exit"
+    echo "  3) Issue SSL certificate"
+    echo "  4) Remove domain"
+    echo "  5) Exit"
     echo ""
 }
 
@@ -1098,13 +1152,14 @@ main() {
     
     while true; do
         show_menu
-        read -rp "Enter your choice (1-4): " choice
+        read -rp "Enter your choice (1-5): " choice
         
         case "$choice" in
             1) setup_domain ;;
             2) list_domains ;;
-            3) remove_domain ;;
-            4) 
+            3) issue_ssl_certificate ;;
+            4) remove_domain ;;
+            5) 
                 echo -e "\n${YELLOW}Goodbye!${NC}\n"
                 exit 0 
                 ;;
