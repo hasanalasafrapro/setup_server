@@ -265,6 +265,20 @@ install_mysql() {
 install_php() {
     print_header "Installing PHP"
     
+    # Clean up any broken Apache PHP modules if Apache is not selected
+    if [ "$INSTALL_APACHE" = false ]; then
+        if [ -d "/etc/apache2/mods-enabled" ]; then
+            print_step "Cleaning up broken Apache PHP modules..."
+            for phpmod in /etc/apache2/mods-enabled/php*.load 2>/dev/null; do
+                if [ -f "$phpmod" ]; then
+                    local modname=$(basename "$phpmod" .load)
+                    sudo a2dismod "$modname" 2>/dev/null || true
+                    print_warning "Disabled orphan Apache module: $modname"
+                fi
+            done
+        fi
+    fi
+    
     # Available PHP versions
     local available_versions=("8.4" "8.3" "8.2" "8.1" "8.0" "7.4" "7.3" "7.2")
     local selected_versions=()
@@ -339,20 +353,32 @@ install_php() {
     for ver in "${selected_versions[@]}"; do
         print_header "Installing PHP $ver"
         
-        print_step "Installing PHP $ver and modules..."
-        sudo NEEDRESTART_MODE=a apt install php$ver -y
+        print_step "Installing PHP $ver CLI and FPM..."
+        # Install CLI and FPM first (without Apache module dependency)
+        sudo NEEDRESTART_MODE=a apt install php$ver-cli php$ver-fpm -y
+        
+        print_step "Installing PHP $ver modules..."
         sudo NEEDRESTART_MODE=a apt install php$ver-common php$ver-mysql php$ver-xml \
             php$ver-xmlrpc php$ver-curl php$ver-gd php$ver-imagick \
-            php$ver-cli php$ver-dev php$ver-imap php$ver-mbstring \
+            php$ver-dev php$ver-imap php$ver-mbstring \
             php$ver-opcache php$ver-soap php$ver-zip php$ver-intl \
             php$ver-bcmath -y 2>/dev/null || print_warning "Some modules may not be available for PHP $ver"
         
+        # Only install Apache module if Apache is selected
         if [ "$INSTALL_APACHE" = true ]; then
+            print_step "Installing Apache PHP $ver module..."
             sudo NEEDRESTART_MODE=a apt install libapache2-mod-php$ver -y 2>/dev/null || true
+        else
+            # Remove/disable any accidentally installed Apache PHP modules
+            if [ -f "/etc/apache2/mods-enabled/php$ver.load" ]; then
+                print_step "Disabling Apache PHP $ver module (Apache not selected)..."
+                sudo a2dismod php$ver 2>/dev/null || true
+            fi
+            # Prevent Apache PHP module from being installed as dependency
+            sudo apt-mark hold libapache2-mod-php$ver 2>/dev/null || true
         fi
         
-        print_step "Installing PHP $ver FPM..."
-        sudo NEEDRESTART_MODE=a apt install php$ver-fpm -y
+        print_step "Starting PHP $ver FPM service..."
         sudo systemctl start php$ver-fpm
         sudo systemctl enable php$ver-fpm
         
