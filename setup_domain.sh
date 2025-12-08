@@ -686,6 +686,8 @@ setup_ssl() {
     local domain="$1"
     local web_server="$2"
     local email=""
+    local include_www=false
+    local domain_args=""
     
     if ! command -v certbot &> /dev/null; then
         print_warning "Certbot is not installed. Skipping SSL setup."
@@ -700,12 +702,20 @@ setup_ssl() {
         print_warning "Email format appears invalid, but continuing anyway..."
     fi
     
+    # Ask about www subdomain
+    if prompt_yes_no "Include www.${domain} in the certificate?" "y"; then
+        include_www=true
+        domain_args="-d ${domain} -d www.${domain}"
+    else
+        domain_args="-d ${domain}"
+    fi
+    
     print_step "Setting up SSL certificate for ${domain}..."
     
     if [ "$web_server" = "apache" ]; then
-        sudo certbot --apache -d "$domain" -d "www.${domain}" --non-interactive --agree-tos --redirect --email "$email"
+        sudo certbot --apache $domain_args --non-interactive --agree-tos --redirect --email "$email"
     elif [ "$web_server" = "nginx" ]; then
-        sudo certbot --nginx -d "$domain" -d "www.${domain}" --non-interactive --agree-tos --redirect --email "$email"
+        sudo certbot --nginx $domain_args --non-interactive --agree-tos --redirect --email "$email"
     fi
     
     if [ $? -eq 0 ]; then
@@ -713,6 +723,11 @@ setup_ssl() {
         return 0
     else
         print_error "SSL certificate installation failed."
+        if [ "$include_www" = true ]; then
+            echo ""
+            print_warning "Tip: If www.${domain} failed, try again without www subdomain."
+            print_warning "Make sure www.${domain} has DNS pointing to this server and is configured in ${web_server}."
+        fi
         return 1
     fi
 }
