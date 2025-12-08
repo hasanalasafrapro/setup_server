@@ -672,6 +672,22 @@ install_mongodb_docker() {
         fi
     fi
     
+    # Deployment type selection
+    echo -e "${CYAN}Select MongoDB deployment type:${NC}"
+    echo "  1) Single Node (simple setup)"
+    echo "  2) Replica Set - 3 Nodes (high availability)"
+    read -rp "Enter your choice (1-2): " deployment_choice
+    
+    case "$deployment_choice" in
+        2)
+            install_mongodb_replica_set
+            return $?
+            ;;
+        *)
+            # Continue with single node installation
+            ;;
+    esac
+    
     # MongoDB version selection for Docker
     echo -e "${CYAN}Select MongoDB Docker version to install:${NC}"
     echo -e "${GREEN}Docker images are available for all MongoDB versions!${NC}"
@@ -804,6 +820,416 @@ install_mongodb_docker() {
     fi
     
     print_success "MongoDB $mongodb_docker_version installed via Docker successfully!"
+}
+
+install_mongodb_replica_set() {
+    print_header "Installing MongoDB Replica Set (High Availability)"
+    
+    echo -e "${CYAN}This will set up a 3-node MongoDB replica set for high availability.${NC}"
+    echo -e "${YELLOW}Requirements: Docker and Docker Compose${NC}\n"
+    
+    # Check if Docker Compose is available
+    if ! docker compose version &> /dev/null && ! docker-compose --version &> /dev/null; then
+        print_error "Docker Compose is not available. Please install Docker with Compose plugin."
+        return 1
+    fi
+    
+    # MongoDB version selection
+    echo -e "${CYAN}Select MongoDB version for replica set:${NC}"
+    local mongo_versions=("8 (Latest)" "7" "6" "5" "Custom")
+    
+    for i in "${!mongo_versions[@]}"; do
+        echo "  $((i+1))) MongoDB ${mongo_versions[$i]}"
+    done
+    
+    while true; do
+        read -rp "Enter your choice (1-${#mongo_versions[@]}): " choice
+        if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#mongo_versions[@]}" ]; then
+            if [ "$choice" -eq "${#mongo_versions[@]}" ]; then
+                prompt_for_input "Enter MongoDB version (e.g., 7.0)" mongodb_docker_version
+            else
+                mongodb_docker_version=$(echo "${mongo_versions[$((choice-1))]}" | awk '{print $1}')
+            fi
+            break
+        else
+            print_error "Invalid selection."
+        fi
+    done
+    
+    # Configuration
+    local replica_set_name="rs0"
+    local base_port="27017"
+    local base_dir="/var/lib/mongodb-cluster"
+    local mongo_root_user=""
+    local mongo_root_pass=""
+    local keyfile_path="$base_dir/keyfile"
+    
+    echo ""
+    if prompt_yes_no "Would you like to customize replica set configuration?"; then
+        read -rp "Enter replica set name (default: rs0): " input_rs
+        [ -n "$input_rs" ] && replica_set_name="$input_rs"
+        
+        read -rp "Enter base port (nodes will use port, port+1, port+2) (default: 27017): " input_port
+        [ -n "$input_port" ] && base_port="$input_port"
+        
+        read -rp "Enter base data directory (default: /var/lib/mongodb-cluster): " input_dir
+        [ -n "$input_dir" ] && base_dir="$input_dir"
+    fi
+    
+    if prompt_yes_no "Would you like to set up MongoDB authentication? (recommended for production)"; then
+        prompt_for_input "Enter MongoDB root username" mongo_root_user
+        prompt_for_input "Enter MongoDB root password" mongo_root_pass
+    fi
+    
+    # Calculate ports
+    local port1=$base_port
+    local port2=$((base_port + 1))
+    local port3=$((base_port + 2))
+    
+    print_step "Creating directories..."
+    sudo mkdir -p "$base_dir"/{mongo1,mongo2,mongo3,config}
+    sudo chmod -R 755 "$base_dir"
+    
+    # Generate keyfile for replica set authentication
+    print_step "Generating replica set keyfile..."
+    openssl rand -base64 756 | sudo tee "$keyfile_path" > /dev/null
+    sudo chmod 400 "$keyfile_path"
+    sudo chown 999:999 "$keyfile_path"  # MongoDB user in container
+    
+    # Create Docker Compose file
+    print_step "Creating Docker Compose configuration..."
+    
+    local compose_file="$base_dir/docker-compose.yml"
+    
+    if [ -n "$mongo_root_user" ] && [ -n "$mongo_root_pass" ]; then
+        cat <<EOF | sudo tee "$compose_file" > /dev/null
+version: '3.8'
+
+services:
+  mongo1:
+    image: mongo:${mongodb_docker_version}
+    container_name: mongo1
+    hostname: mongo1
+    restart: unless-stopped
+    ports:
+      - "${port1}:27017"
+    volumes:
+      - ${base_dir}/mongo1:/data/db
+      - ${keyfile_path}:/etc/mongodb/keyfile:ro
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${mongo_root_user}
+      MONGO_INITDB_ROOT_PASSWORD: ${mongo_root_pass}
+    command: mongod --replSet ${replica_set_name} --keyFile /etc/mongodb/keyfile --bind_ip_all
+    networks:
+      - mongo-cluster
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  mongo2:
+    image: mongo:${mongodb_docker_version}
+    container_name: mongo2
+    hostname: mongo2
+    restart: unless-stopped
+    ports:
+      - "${port2}:27017"
+    volumes:
+      - ${base_dir}/mongo2:/data/db
+      - ${keyfile_path}:/etc/mongodb/keyfile:ro
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${mongo_root_user}
+      MONGO_INITDB_ROOT_PASSWORD: ${mongo_root_pass}
+    command: mongod --replSet ${replica_set_name} --keyFile /etc/mongodb/keyfile --bind_ip_all
+    networks:
+      - mongo-cluster
+    depends_on:
+      - mongo1
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  mongo3:
+    image: mongo:${mongodb_docker_version}
+    container_name: mongo3
+    hostname: mongo3
+    restart: unless-stopped
+    ports:
+      - "${port3}:27017"
+    volumes:
+      - ${base_dir}/mongo3:/data/db
+      - ${keyfile_path}:/etc/mongodb/keyfile:ro
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${mongo_root_user}
+      MONGO_INITDB_ROOT_PASSWORD: ${mongo_root_pass}
+    command: mongod --replSet ${replica_set_name} --keyFile /etc/mongodb/keyfile --bind_ip_all
+    networks:
+      - mongo-cluster
+    depends_on:
+      - mongo1
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+networks:
+  mongo-cluster:
+    driver: bridge
+EOF
+    else
+        cat <<EOF | sudo tee "$compose_file" > /dev/null
+version: '3.8'
+
+services:
+  mongo1:
+    image: mongo:${mongodb_docker_version}
+    container_name: mongo1
+    hostname: mongo1
+    restart: unless-stopped
+    ports:
+      - "${port1}:27017"
+    volumes:
+      - ${base_dir}/mongo1:/data/db
+    command: mongod --replSet ${replica_set_name} --bind_ip_all
+    networks:
+      - mongo-cluster
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  mongo2:
+    image: mongo:${mongodb_docker_version}
+    container_name: mongo2
+    hostname: mongo2
+    restart: unless-stopped
+    ports:
+      - "${port2}:27017"
+    volumes:
+      - ${base_dir}/mongo2:/data/db
+    command: mongod --replSet ${replica_set_name} --bind_ip_all
+    networks:
+      - mongo-cluster
+    depends_on:
+      - mongo1
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  mongo3:
+    image: mongo:${mongodb_docker_version}
+    container_name: mongo3
+    hostname: mongo3
+    restart: unless-stopped
+    ports:
+      - "${port3}:27017"
+    volumes:
+      - ${base_dir}/mongo3:/data/db
+    command: mongod --replSet ${replica_set_name} --bind_ip_all
+    networks:
+      - mongo-cluster
+    depends_on:
+      - mongo1
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+networks:
+  mongo-cluster:
+    driver: bridge
+EOF
+    fi
+    
+    # Create replica set initialization script
+    print_step "Creating replica set initialization script..."
+    
+    local init_script="$base_dir/init-replica-set.sh"
+    
+    if [ -n "$mongo_root_user" ] && [ -n "$mongo_root_pass" ]; then
+        cat <<EOF | sudo tee "$init_script" > /dev/null
+#!/bin/bash
+echo "Waiting for MongoDB nodes to be ready..."
+sleep 10
+
+echo "Initializing replica set..."
+docker exec mongo1 mongosh -u "${mongo_root_user}" -p "${mongo_root_pass}" --authenticationDatabase admin --eval '
+rs.initiate({
+  _id: "${replica_set_name}",
+  members: [
+    { _id: 0, host: "mongo1:27017", priority: 2 },
+    { _id: 1, host: "mongo2:27017", priority: 1 },
+    { _id: 2, host: "mongo3:27017", priority: 1 }
+  ]
+});
+'
+
+echo "Waiting for replica set to initialize..."
+sleep 10
+
+echo "Checking replica set status..."
+docker exec mongo1 mongosh -u "${mongo_root_user}" -p "${mongo_root_pass}" --authenticationDatabase admin --eval 'rs.status()'
+EOF
+    else
+        cat <<EOF | sudo tee "$init_script" > /dev/null
+#!/bin/bash
+echo "Waiting for MongoDB nodes to be ready..."
+sleep 10
+
+echo "Initializing replica set..."
+docker exec mongo1 mongosh --eval '
+rs.initiate({
+  _id: "${replica_set_name}",
+  members: [
+    { _id: 0, host: "mongo1:27017", priority: 2 },
+    { _id: 1, host: "mongo2:27017", priority: 1 },
+    { _id: 2, host: "mongo3:27017", priority: 1 }
+  ]
+});
+'
+
+echo "Waiting for replica set to initialize..."
+sleep 10
+
+echo "Checking replica set status..."
+docker exec mongo1 mongosh --eval 'rs.status()'
+EOF
+    fi
+    
+    sudo chmod +x "$init_script"
+    
+    # Create management scripts
+    print_step "Creating management scripts..."
+    
+    # Start script
+    cat <<EOF | sudo tee "$base_dir/start.sh" > /dev/null
+#!/bin/bash
+cd "$base_dir"
+docker compose up -d
+echo "MongoDB Replica Set started!"
+EOF
+    sudo chmod +x "$base_dir/start.sh"
+    
+    # Stop script
+    cat <<EOF | sudo tee "$base_dir/stop.sh" > /dev/null
+#!/bin/bash
+cd "$base_dir"
+docker compose down
+echo "MongoDB Replica Set stopped!"
+EOF
+    sudo chmod +x "$base_dir/stop.sh"
+    
+    # Status script
+    cat <<EOF | sudo tee "$base_dir/status.sh" > /dev/null
+#!/bin/bash
+echo "=== Container Status ==="
+docker ps --filter "name=mongo" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+echo ""
+echo "=== Replica Set Status ==="
+EOF
+    
+    if [ -n "$mongo_root_user" ] && [ -n "$mongo_root_pass" ]; then
+        cat <<EOF | sudo tee -a "$base_dir/status.sh" > /dev/null
+docker exec mongo1 mongosh -u "${mongo_root_user}" -p "${mongo_root_pass}" --authenticationDatabase admin --quiet --eval 'rs.status().members.forEach(m => print(m.name + " - " + m.stateStr))'
+EOF
+    else
+        cat <<EOF | sudo tee -a "$base_dir/status.sh" > /dev/null
+docker exec mongo1 mongosh --quiet --eval 'rs.status().members.forEach(m => print(m.name + " - " + m.stateStr))'
+EOF
+    fi
+    sudo chmod +x "$base_dir/status.sh"
+    
+    # Pull MongoDB image
+    print_step "Pulling MongoDB Docker image..."
+    sudo docker pull mongo:$mongodb_docker_version
+    
+    # Start the replica set
+    print_step "Starting MongoDB Replica Set..."
+    cd "$base_dir"
+    sudo docker compose up -d
+    
+    if [ $? -ne 0 ]; then
+        print_error "Failed to start MongoDB containers."
+        return 1
+    fi
+    
+    # Wait for containers to be ready
+    print_step "Waiting for containers to be ready..."
+    sleep 15
+    
+    # Initialize replica set
+    print_step "Initializing replica set..."
+    sudo bash "$init_script"
+    
+    # Verify replica set
+    print_step "Verifying replica set status..."
+    sleep 5
+    
+    if sudo docker ps --filter "name=mongo1" --format '{{.Names}}' | grep -q "mongo1"; then
+        print_success "MongoDB Replica Set is running!"
+        echo ""
+        echo -e "${CYAN}═══════════════════════════════════════════════════════════════${NC}"
+        echo -e "${GREEN}MongoDB Replica Set Information${NC}"
+        echo -e "${CYAN}═══════════════════════════════════════════════════════════════${NC}"
+        echo ""
+        echo -e "${YELLOW}Nodes:${NC}"
+        echo "  • mongo1 (Primary):   localhost:${port1}"
+        echo "  • mongo2 (Secondary): localhost:${port2}"
+        echo "  • mongo3 (Secondary): localhost:${port3}"
+        echo ""
+        echo -e "${YELLOW}Replica Set Name:${NC} ${replica_set_name}"
+        echo -e "${YELLOW}Data Directory:${NC} ${base_dir}"
+        echo -e "${YELLOW}MongoDB Version:${NC} ${mongodb_docker_version}"
+        echo ""
+        if [ -n "$mongo_root_user" ]; then
+            echo -e "${YELLOW}Authentication:${NC}"
+            echo "  Username: ${mongo_root_user}"
+            echo "  Password: (as configured)"
+            echo ""
+            echo -e "${YELLOW}Connection String:${NC}"
+            echo "  mongodb://${mongo_root_user}:<password>@localhost:${port1},localhost:${port2},localhost:${port3}/?replicaSet=${replica_set_name}"
+        else
+            echo -e "${YELLOW}Connection String:${NC}"
+            echo "  mongodb://localhost:${port1},localhost:${port2},localhost:${port3}/?replicaSet=${replica_set_name}"
+        fi
+        echo ""
+        echo -e "${YELLOW}Management Scripts:${NC}"
+        echo "  Start:  sudo ${base_dir}/start.sh"
+        echo "  Stop:   sudo ${base_dir}/stop.sh"
+        echo "  Status: sudo ${base_dir}/status.sh"
+        echo "  Init:   sudo ${base_dir}/init-replica-set.sh"
+        echo ""
+        echo -e "${YELLOW}Docker Commands:${NC}"
+        echo "  View logs:     docker logs mongo1"
+        echo "  Shell (primary): docker exec -it mongo1 mongosh"
+        echo "  Compose logs:  cd ${base_dir} && docker compose logs -f"
+        echo ""
+        echo -e "${CYAN}═══════════════════════════════════════════════════════════════${NC}"
+    else
+        print_error "Failed to verify replica set. Check logs with: docker logs mongo1"
+        return 1
+    fi
+    
+    # Install PHP MongoDB extension if PHP is installed
+    if [ -n "$php_version" ]; then
+        php_ini_file="/etc/php/$php_version/fpm/php.ini"
+        if [ -f "$php_ini_file" ]; then
+            print_step "Installing PHP MongoDB driver..."
+            add_php_extension "mongodb.so" "$php_ini_file"
+            sudo NEEDRESTART_MODE=a printf "\n" | pecl install -f mongodb
+            sudo systemctl restart php$php_version-fpm
+        fi
+    fi
+    
+    print_success "MongoDB Replica Set installed successfully!"
 }
 
 show_main_menu() {
