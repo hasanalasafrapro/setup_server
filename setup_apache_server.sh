@@ -368,11 +368,11 @@ install_mongodb() {
     print_header "Installing MongoDB"
     
     # Valid MongoDB versions (update this list as new versions are released)
-    local valid_versions=("8.0" "7.0" "6.0" "5.0" "4.4" "4.2")
+    local valid_versions=("8.2" "8.0" "7.0" "6.0" "5.0" "4.4" "4.2")
     
     # MongoDB version selection
     echo -e "${CYAN}Select MongoDB version to install:${NC}"
-    local mongo_versions=("8.0 (Latest)" "7.0" "6.0" "5.0" "Custom")
+    local mongo_versions=("8.2 (Latest)" "8.0" "7.0" "6.0" "5.0" "Custom")
     
     for i in "${!mongo_versions[@]}"; do
         echo "  $((i+1))) MongoDB ${mongo_versions[$i]}"
@@ -420,8 +420,8 @@ install_mongodb() {
         echo ""
         
         # Ask user to select a valid version
-        if prompt_yes_no "Would you like to install MongoDB 8.0 (latest stable) instead?"; then
-            mongodb_version="8.0"
+        if prompt_yes_no "Would you like to install MongoDB 8.2 (latest stable) instead?"; then
+            mongodb_version="8.2"
         else
             print_error "MongoDB installation skipped."
             return 1
