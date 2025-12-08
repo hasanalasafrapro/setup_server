@@ -367,9 +367,12 @@ EOF
 install_mongodb() {
     print_header "Installing MongoDB"
     
+    # Valid MongoDB versions (update this list as new versions are released)
+    local valid_versions=("8.0" "7.0" "6.0" "5.0" "4.4" "4.2")
+    
     # MongoDB version selection
     echo -e "${CYAN}Select MongoDB version to install:${NC}"
-    local mongo_versions=("8.0" "7.0" "6.0" "5.0" "Custom")
+    local mongo_versions=("8.0 (Latest)" "7.0" "6.0" "5.0" "Custom")
     
     for i in "${!mongo_versions[@]}"; do
         echo "  $((i+1))) MongoDB ${mongo_versions[$i]}"
@@ -379,9 +382,24 @@ install_mongodb() {
         read -rp "Enter your choice (1-${#mongo_versions[@]}): " choice
         if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#mongo_versions[@]}" ]; then
             if [ "$choice" -eq "${#mongo_versions[@]}" ]; then
-                prompt_for_input "Enter custom MongoDB version (e.g., 7.0)" mongodb_version
+                echo -e "${YELLOW}Valid MongoDB versions: ${valid_versions[*]}${NC}"
+                prompt_for_input "Enter MongoDB version (e.g., 7.0)" mongodb_version
+                
+                # Validate custom version
+                local is_valid=false
+                for v in "${valid_versions[@]}"; do
+                    if [ "$mongodb_version" = "$v" ]; then
+                        is_valid=true
+                        break
+                    fi
+                done
+                
+                if [ "$is_valid" = false ]; then
+                    print_warning "Version $mongodb_version may not be available. Checking..."
+                fi
             else
-                mongodb_version="${mongo_versions[$((choice-1))]}"
+                # Extract version number (remove " (Latest)" suffix if present)
+                mongodb_version=$(echo "${mongo_versions[$((choice-1))]}" | awk '{print $1}')
             fi
             break
         else
@@ -392,14 +410,45 @@ install_mongodb() {
     # Detect Ubuntu version for repository
     ubuntu_codename=$(lsb_release -cs)
     
+    # Verify the GPG key URL exists before proceeding
+    print_step "Verifying MongoDB repository for version $mongodb_version..."
+    local gpg_url="https://www.mongodb.org/static/pgp/server-$mongodb_version.asc"
+    
+    if ! curl -fsSL --head "$gpg_url" >/dev/null 2>&1; then
+        print_error "MongoDB version $mongodb_version does not exist or is not available."
+        print_warning "Available versions: ${valid_versions[*]}"
+        echo ""
+        
+        # Ask user to select a valid version
+        if prompt_yes_no "Would you like to install MongoDB 8.0 (latest stable) instead?"; then
+            mongodb_version="8.0"
+        else
+            print_error "MongoDB installation skipped."
+            return 1
+        fi
+    fi
+    
     print_step "Adding MongoDB repository for version $mongodb_version..."
-    curl -fsSL https://www.mongodb.org/static/pgp/server-$mongodb_version.asc | sudo gpg -o /usr/share/keyrings/mongodb-server-$mongodb_version.gpg --dearmor
+    curl -fsSL https://www.mongodb.org/static/pgp/server-$mongodb_version.asc | sudo gpg --dearmor -o /usr/share/keyrings/mongodb-server-$mongodb_version.gpg --yes
     echo "deb [ arch=amd64,arm64 signed-by=/usr/share/keyrings/mongodb-server-$mongodb_version.gpg ] https://repo.mongodb.org/apt/ubuntu $ubuntu_codename/mongodb-org/$mongodb_version multiverse" | sudo tee /etc/apt/sources.list.d/mongodb-org-$mongodb_version.list
     
     sudo apt update
     
+    # Check if mongodb-org package is available
+    if ! apt-cache show mongodb-org >/dev/null 2>&1; then
+        print_error "MongoDB package not found. The version may not support Ubuntu $ubuntu_codename."
+        print_warning "Try a different MongoDB version or check https://www.mongodb.com/docs/manual/installation/"
+        return 1
+    fi
+    
     print_step "Installing MongoDB..."
     sudo NEEDRESTART_MODE=a apt install mongodb-org -y
+    
+    if [ $? -ne 0 ]; then
+        print_error "MongoDB installation failed."
+        return 1
+    fi
+    
     sudo systemctl start mongod.service
     sudo systemctl enable mongod
     
