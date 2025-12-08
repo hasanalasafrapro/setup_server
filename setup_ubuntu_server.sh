@@ -1,8 +1,11 @@
 #!/bin/bash
 
 # =============================================================================
-# Interactive Apache Server Setup Script
+# Interactive Ubuntu Server Setup Script
+# Version: 2.0.0
 # =============================================================================
+
+set -o pipefail
 
 # Colors for output
 RED='\033[0;31m'
@@ -12,10 +15,21 @@ BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
+# Script configuration
+SCRIPT_VERSION="2.0.0"
+LOG_DIR="/var/log/server-setup"
+LOG_FILE="$LOG_DIR/setup-$(date +%Y%m%d-%H%M%S).log"
+BACKUP_DIR="/root/server-setup-backups"
+AUTO_CONFIRM=false
+QUIET_MODE=false
+INTERACTIVE_MODE=true
+
 # Installation flags (default: not selected)
 INSTALL_APACHE=false
 INSTALL_NGINX=false
 INSTALL_MYSQL=false
+INSTALL_POSTGRESQL=false
+INSTALL_REDIS=false
 INSTALL_PHP=false
 INSTALL_MONGODB=false
 INSTALL_MONGODB_DOCKER=false
@@ -29,6 +43,7 @@ php_version=""
 mongodb_version=""
 nodejs_version=""
 mongodb_docker_version=""
+postgresql_version=""
 
 # =============================================================================
 # Utility Functions
@@ -108,6 +123,579 @@ select_from_menu() {
     done
     
     echo "${options[$selected]}"
+}
+
+# =============================================================================
+# Logging Functions
+# =============================================================================
+
+init_logging() {
+    sudo mkdir -p "$LOG_DIR"
+    sudo touch "$LOG_FILE"
+    sudo chmod 644 "$LOG_FILE"
+    echo "=== Server Setup Log - $(date) ===" | sudo tee "$LOG_FILE" > /dev/null
+    echo "Script Version: $SCRIPT_VERSION" | sudo tee -a "$LOG_FILE" > /dev/null
+    echo "========================================" | sudo tee -a "$LOG_FILE" > /dev/null
+}
+
+log() {
+    local level="$1"
+    local message="$2"
+    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    echo "[$timestamp] [$level] $message" | sudo tee -a "$LOG_FILE" > /dev/null
+    
+    if [ "$QUIET_MODE" = false ]; then
+        case "$level" in
+            INFO) echo -e "${GREEN}▶ $message${NC}" ;;
+            WARN) echo -e "${YELLOW}⚠ $message${NC}" ;;
+            ERROR) echo -e "${RED}✖ $message${NC}" ;;
+            SUCCESS) echo -e "${GREEN}✔ $message${NC}" ;;
+        esac
+    fi
+}
+
+log_cmd() {
+    local cmd="$1"
+    echo "[CMD] $cmd" | sudo tee -a "$LOG_FILE" > /dev/null
+    eval "$cmd" 2>&1 | sudo tee -a "$LOG_FILE"
+    return ${PIPESTATUS[0]}
+}
+
+# =============================================================================
+# Pre-flight Checks
+# =============================================================================
+
+preflight_checks() {
+    print_header "Pre-flight System Checks"
+    
+    local checks_passed=true
+    
+    # Check if running as root or with sudo capability
+    if [ "$EUID" -ne 0 ]; then
+        if ! sudo -n true 2>/dev/null; then
+            print_error "This script requires root privileges or sudo access."
+            print_step "Please run with: sudo $0"
+            exit 1
+        fi
+    fi
+    print_success "Privileges: OK (sudo available)"
+    
+    # Check OS
+    if [ ! -f /etc/os-release ]; then
+        print_error "Cannot detect OS. This script requires Ubuntu."
+        exit 1
+    fi
+    
+    source /etc/os-release
+    if [ "$ID" != "ubuntu" ]; then
+        print_error "This script is designed for Ubuntu. Detected: $ID"
+        print_warning "Proceeding anyway, but some features may not work."
+        checks_passed=false
+    else
+        print_success "Operating System: Ubuntu $VERSION_ID ($VERSION_CODENAME)"
+    fi
+    
+    # Check Ubuntu version (18.04+)
+    local version_num=$(echo "$VERSION_ID" | tr -d '.')
+    if [ "$version_num" -lt 1804 ]; then
+        print_warning "Ubuntu version $VERSION_ID may not be fully supported. Recommended: 20.04+"
+    fi
+    
+    # Check internet connectivity
+    print_step "Checking internet connectivity..."
+    if ping -c 1 -W 5 8.8.8.8 &> /dev/null; then
+        print_success "Internet: Connected"
+    elif ping -c 1 -W 5 1.1.1.1 &> /dev/null; then
+        print_success "Internet: Connected"
+    else
+        print_error "No internet connection detected."
+        print_warning "Some installations may fail without internet access."
+        checks_passed=false
+    fi
+    
+    # Check DNS resolution
+    if host google.com &> /dev/null || nslookup google.com &> /dev/null 2>&1; then
+        print_success "DNS Resolution: OK"
+    else
+        print_warning "DNS resolution may have issues."
+    fi
+    
+    # Check disk space (require at least 5GB free on /)
+    local free_space_kb=$(df / --output=avail | tail -1 | tr -d ' ')
+    local free_space_gb=$((free_space_kb / 1024 / 1024))
+    if [ "$free_space_gb" -lt 5 ]; then
+        print_warning "Low disk space: ${free_space_gb}GB available (5GB+ recommended)"
+        checks_passed=false
+    else
+        print_success "Disk Space: ${free_space_gb}GB available"
+    fi
+    
+    # Check memory
+    local total_mem_mb=$(free -m | awk '/^Mem:/{print $2}')
+    local free_mem_mb=$(free -m | awk '/^Mem:/{print $7}')
+    if [ "$total_mem_mb" -lt 1024 ]; then
+        print_warning "Low memory: ${total_mem_mb}MB total (1GB+ recommended)"
+    else
+        print_success "Memory: ${total_mem_mb}MB total, ${free_mem_mb}MB available"
+    fi
+    
+    # Check if apt is locked
+    if fuser /var/lib/dpkg/lock-frontend &> /dev/null; then
+        print_error "APT is locked. Another package manager is running."
+        print_warning "Wait for it to finish or run: sudo killall apt apt-get"
+        checks_passed=false
+    else
+        print_success "Package Manager: Available"
+    fi
+    
+    echo ""
+    if [ "$checks_passed" = false ]; then
+        print_warning "Some pre-flight checks failed. Installation may encounter issues."
+        if [ "$AUTO_CONFIRM" = false ]; then
+            if ! prompt_yes_no "Continue anyway?"; then
+                exit 1
+            fi
+        fi
+    else
+        print_success "All pre-flight checks passed!"
+    fi
+    
+    echo ""
+}
+
+# =============================================================================
+# Backup Functions
+# =============================================================================
+
+backup_configs() {
+    local backup_timestamp=$(date +%Y%m%d-%H%M%S)
+    local backup_path="$BACKUP_DIR/backup-$backup_timestamp"
+    
+    print_header "Creating Configuration Backup"
+    
+    sudo mkdir -p "$backup_path"
+    
+    print_step "Backing up existing configurations..."
+    
+    # Backup web server configs
+    [ -d /etc/apache2 ] && sudo cp -r /etc/apache2 "$backup_path/" 2>/dev/null && print_success "Backed up: /etc/apache2"
+    [ -d /etc/nginx ] && sudo cp -r /etc/nginx "$backup_path/" 2>/dev/null && print_success "Backed up: /etc/nginx"
+    
+    # Backup database configs
+    [ -d /etc/mysql ] && sudo cp -r /etc/mysql "$backup_path/" 2>/dev/null && print_success "Backed up: /etc/mysql"
+    [ -d /etc/postgresql ] && sudo cp -r /etc/postgresql "$backup_path/" 2>/dev/null && print_success "Backed up: /etc/postgresql"
+    [ -f /etc/mongod.conf ] && sudo cp /etc/mongod.conf "$backup_path/" 2>/dev/null && print_success "Backed up: /etc/mongod.conf"
+    [ -f /etc/redis/redis.conf ] && sudo cp -r /etc/redis "$backup_path/" 2>/dev/null && print_success "Backed up: /etc/redis"
+    
+    # Backup PHP configs
+    [ -d /etc/php ] && sudo cp -r /etc/php "$backup_path/" 2>/dev/null && print_success "Backed up: /etc/php"
+    
+    # Create backup info file
+    cat << EOF | sudo tee "$backup_path/backup-info.txt" > /dev/null
+Backup created: $(date)
+Script version: $SCRIPT_VERSION
+Ubuntu version: $(lsb_release -ds 2>/dev/null || echo "Unknown")
+Hostname: $(hostname)
+EOF
+    
+    print_success "Backup saved to: $backup_path"
+    echo "$backup_path"
+}
+
+restore_backup() {
+    print_header "Restore Configuration Backup"
+    
+    if [ ! -d "$BACKUP_DIR" ]; then
+        print_error "No backups found in $BACKUP_DIR"
+        return 1
+    fi
+    
+    # List available backups
+    echo -e "${CYAN}Available backups:${NC}"
+    local backups=($(ls -1d "$BACKUP_DIR"/backup-* 2>/dev/null | sort -r))
+    
+    if [ ${#backups[@]} -eq 0 ]; then
+        print_error "No backups found."
+        return 1
+    fi
+    
+    for i in "${!backups[@]}"; do
+        local backup_name=$(basename "${backups[$i]}")
+        local backup_date=$(cat "${backups[$i]}/backup-info.txt" 2>/dev/null | head -1 || echo "Unknown date")
+        echo "  $((i+1))) $backup_name - $backup_date"
+    done
+    
+    read -rp "Select backup to restore (1-${#backups[@]}): " choice
+    
+    if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#backups[@]}" ]; then
+        local selected_backup="${backups[$((choice-1))]}"
+        
+        print_warning "This will overwrite current configurations!"
+        if prompt_yes_no "Are you sure you want to restore from $selected_backup?"; then
+            print_step "Restoring configurations..."
+            
+            [ -d "$selected_backup/apache2" ] && sudo cp -r "$selected_backup/apache2"/* /etc/apache2/ 2>/dev/null
+            [ -d "$selected_backup/nginx" ] && sudo cp -r "$selected_backup/nginx"/* /etc/nginx/ 2>/dev/null
+            [ -d "$selected_backup/mysql" ] && sudo cp -r "$selected_backup/mysql"/* /etc/mysql/ 2>/dev/null
+            [ -d "$selected_backup/php" ] && sudo cp -r "$selected_backup/php"/* /etc/php/ 2>/dev/null
+            
+            print_success "Configuration restored from backup."
+            print_warning "You may need to restart services for changes to take effect."
+        fi
+    else
+        print_error "Invalid selection."
+    fi
+}
+
+# =============================================================================
+# Command-Line Argument Parsing
+# =============================================================================
+
+show_help() {
+    echo "Ubuntu Server Setup Script v$SCRIPT_VERSION"
+    echo ""
+    echo "Usage: $0 [OPTIONS]"
+    echo ""
+    echo "Options:"
+    echo "  -h, --help              Show this help message"
+    echo "  -v, --version           Show script version"
+    echo "  -y, --yes               Auto-confirm all prompts"
+    echo "  -q, --quiet             Minimal output (logs still written)"
+    echo "  --status                Show server status and exit"
+    echo "  --backup                Create configuration backup and exit"
+    echo "  --restore               Restore from backup and exit"
+    echo ""
+    echo "Installation options:"
+    echo "  --apache                Install Apache web server"
+    echo "  --nginx                 Install Nginx web server"
+    echo "  --mysql                 Install MySQL database"
+    echo "  --postgresql            Install PostgreSQL database"
+    echo "  --redis                 Install Redis cache server"
+    echo "  --php[=VERSION]         Install PHP (e.g., --php=8.3)"
+    echo "  --node[=VERSION]        Install Node.js (e.g., --node=20)"
+    echo "  --mongodb               Install MongoDB (native)"
+    echo "  --mongodb-docker        Install MongoDB via Docker"
+    echo "  --docker                Install Docker"
+    echo "  --certbot               Install Certbot for SSL"
+    echo "  --tools                 Install common tools"
+    echo ""
+    echo "Quick installation:"
+    echo "  --all-apache            Install all with Apache"
+    echo "  --all-nginx             Install all with Nginx"
+    echo ""
+    echo "System options:"
+    echo "  --swap[=SIZE]           Setup swap file (e.g., --swap=4G)"
+    echo ""
+    echo "Examples:"
+    echo "  $0                                    # Interactive mode"
+    echo "  $0 --nginx --php=8.3 --mysql          # Non-interactive install"
+    echo "  $0 --all-nginx -y                     # Full install with Nginx, auto-confirm"
+    echo "  $0 --status                           # Check server status"
+    echo ""
+}
+
+parse_args() {
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            -h|--help)
+                show_help
+                exit 0
+                ;;
+            -v|--version)
+                echo "Server Setup Script v$SCRIPT_VERSION"
+                exit 0
+                ;;
+            -y|--yes)
+                AUTO_CONFIRM=true
+                ;;
+            -q|--quiet)
+                QUIET_MODE=true
+                ;;
+            --status)
+                show_status
+                exit 0
+                ;;
+            --backup)
+                init_logging
+                backup_configs
+                exit 0
+                ;;
+            --restore)
+                restore_backup
+                exit 0
+                ;;
+            --apache)
+                INSTALL_APACHE=true
+                INTERACTIVE_MODE=false
+                ;;
+            --nginx)
+                INSTALL_NGINX=true
+                INTERACTIVE_MODE=false
+                ;;
+            --mysql)
+                INSTALL_MYSQL=true
+                INTERACTIVE_MODE=false
+                ;;
+            --postgresql)
+                INSTALL_POSTGRESQL=true
+                INTERACTIVE_MODE=false
+                ;;
+            --redis)
+                INSTALL_REDIS=true
+                INTERACTIVE_MODE=false
+                ;;
+            --php)
+                INSTALL_PHP=true
+                INTERACTIVE_MODE=false
+                ;;
+            --php=*)
+                INSTALL_PHP=true
+                php_version="${1#*=}"
+                INTERACTIVE_MODE=false
+                ;;
+            --node|--nodejs)
+                INSTALL_NODEJS=true
+                INTERACTIVE_MODE=false
+                ;;
+            --node=*|--nodejs=*)
+                INSTALL_NODEJS=true
+                nodejs_version="${1#*=}"
+                INTERACTIVE_MODE=false
+                ;;
+            --mongodb)
+                INSTALL_MONGODB=true
+                INTERACTIVE_MODE=false
+                ;;
+            --mongodb-docker)
+                INSTALL_MONGODB_DOCKER=true
+                INTERACTIVE_MODE=false
+                ;;
+            --docker)
+                INSTALL_DOCKER=true
+                INTERACTIVE_MODE=false
+                ;;
+            --certbot)
+                INSTALL_CERTBOT=true
+                INTERACTIVE_MODE=false
+                ;;
+            --tools)
+                INSTALL_TOOLS=true
+                INTERACTIVE_MODE=false
+                ;;
+            --all-apache)
+                INSTALL_APACHE=true
+                INSTALL_MYSQL=true
+                INSTALL_PHP=true
+                INSTALL_MONGODB_DOCKER=true
+                INSTALL_DOCKER=true
+                INSTALL_NODEJS=true
+                INSTALL_CERTBOT=true
+                INSTALL_TOOLS=true
+                INTERACTIVE_MODE=false
+                ;;
+            --all-nginx)
+                INSTALL_NGINX=true
+                INSTALL_MYSQL=true
+                INSTALL_PHP=true
+                INSTALL_MONGODB_DOCKER=true
+                INSTALL_DOCKER=true
+                INSTALL_NODEJS=true
+                INSTALL_CERTBOT=true
+                INSTALL_TOOLS=true
+                INTERACTIVE_MODE=false
+                ;;
+            --swap)
+                setup_swap
+                ;;
+            --swap=*)
+                setup_swap "${1#*=}"
+                ;;
+            *)
+                print_error "Unknown option: $1"
+                echo "Use --help for usage information."
+                exit 1
+                ;;
+        esac
+        shift
+    done
+}
+
+# =============================================================================
+# Status Check Functions
+# =============================================================================
+
+show_status() {
+    print_header "Server Status Report"
+    
+    echo -e "${CYAN}System Information:${NC}"
+    echo "  Hostname: $(hostname)"
+    echo "  OS: $(lsb_release -ds 2>/dev/null || cat /etc/os-release | grep PRETTY_NAME | cut -d'"' -f2)"
+    echo "  Kernel: $(uname -r)"
+    echo "  Uptime: $(uptime -p)"
+    echo ""
+    
+    echo -e "${CYAN}Resource Usage:${NC}"
+    echo "  CPU Load: $(cat /proc/loadavg | awk '{print $1, $2, $3}')"
+    echo "  Memory: $(free -h | awk '/^Mem:/{print $3 " / " $2 " (" int($3/$2*100) "%)"}')"
+    echo "  Swap: $(free -h | awk '/^Swap:/{if($2=="0B") print "Not configured"; else print $3 " / " $2}')"
+    echo "  Disk (/): $(df -h / | awk 'NR==2{print $3 " / " $2 " (" $5 ")"}')"
+    echo ""
+    
+    echo -e "${CYAN}Services Status:${NC}"
+    
+    # Web Servers
+    check_service_status "apache2" "Apache"
+    check_service_status "nginx" "Nginx"
+    
+    # Databases
+    check_service_status "mysql" "MySQL"
+    check_service_status "postgresql" "PostgreSQL"
+    check_service_status "mongod" "MongoDB"
+    check_service_status "redis-server" "Redis"
+    
+    # PHP-FPM (check multiple versions)
+    for phpfpm in /run/php/php*-fpm.sock; do
+        if [ -S "$phpfpm" ]; then
+            local ver=$(echo "$phpfpm" | grep -oP 'php\K[0-9.]+')
+            echo -e "  ${GREEN}●${NC} PHP $ver FPM: running"
+        fi
+    done 2>/dev/null
+    
+    # Docker
+    check_service_status "docker" "Docker"
+    
+    # Check Docker containers if Docker is running
+    if systemctl is-active --quiet docker 2>/dev/null; then
+        local running_containers=$(docker ps -q 2>/dev/null | wc -l)
+        local total_containers=$(docker ps -aq 2>/dev/null | wc -l)
+        echo "    └─ Containers: $running_containers running / $total_containers total"
+    fi
+    
+    echo ""
+    
+    # Port usage
+    echo -e "${CYAN}Active Ports:${NC}"
+    sudo ss -tlnp 2>/dev/null | grep LISTEN | awk '{print $4}' | sort -u | while read port; do
+        local service=$(sudo ss -tlnp 2>/dev/null | grep "$port" | awk '{print $NF}' | head -1)
+        echo "  $port - $service"
+    done | head -15
+    
+    echo ""
+    
+    # Installed versions
+    echo -e "${CYAN}Installed Versions:${NC}"
+    command -v apache2 &>/dev/null && echo "  Apache: $(apache2 -v 2>/dev/null | head -1 | awk '{print $3}')"
+    command -v nginx &>/dev/null && echo "  Nginx: $(nginx -v 2>&1 | cut -d'/' -f2)"
+    command -v mysql &>/dev/null && echo "  MySQL: $(mysql --version 2>/dev/null | awk '{print $3}')"
+    command -v psql &>/dev/null && echo "  PostgreSQL: $(psql --version 2>/dev/null | awk '{print $3}')"
+    command -v mongod &>/dev/null && echo "  MongoDB: $(mongod --version 2>/dev/null | head -1 | awk -F'"' '{print $4}')"
+    command -v redis-server &>/dev/null && echo "  Redis: $(redis-server --version 2>/dev/null | awk '{print $3}' | cut -d'=' -f2)"
+    command -v php &>/dev/null && echo "  PHP: $(php -v 2>/dev/null | head -1 | awk '{print $2}')"
+    command -v node &>/dev/null && echo "  Node.js: $(node -v 2>/dev/null)"
+    command -v docker &>/dev/null && echo "  Docker: $(docker --version 2>/dev/null | awk '{print $3}' | tr -d ',')"
+    
+    echo ""
+}
+
+check_service_status() {
+    local service="$1"
+    local display_name="$2"
+    
+    if systemctl is-active --quiet "$service" 2>/dev/null; then
+        echo -e "  ${GREEN}●${NC} $display_name: running"
+    elif systemctl is-enabled --quiet "$service" 2>/dev/null; then
+        echo -e "  ${RED}●${NC} $display_name: stopped (enabled)"
+    elif command -v "$service" &>/dev/null || [ -f "/etc/init.d/$service" ]; then
+        echo -e "  ${YELLOW}●${NC} $display_name: installed (disabled)"
+    fi
+}
+
+# =============================================================================
+# Swap Management
+# =============================================================================
+
+setup_swap() {
+    local swap_size="${1:-auto}"
+    
+    print_header "Swap Configuration"
+    
+    # Check existing swap
+    local current_swap=$(free -m | awk '/^Swap:/{print $2}')
+    if [ "$current_swap" -gt 0 ]; then
+        print_warning "Swap is already configured: ${current_swap}MB"
+        if [ -f /swapfile ]; then
+            echo "  Swap file: /swapfile"
+        fi
+        swapon --show
+        echo ""
+        
+        if ! prompt_yes_no "Would you like to resize the swap?"; then
+            return 0
+        fi
+        
+        print_step "Disabling current swap..."
+        sudo swapoff -a
+        [ -f /swapfile ] && sudo rm /swapfile
+    fi
+    
+    # Calculate swap size
+    local mem_total_mb=$(free -m | awk '/^Mem:/{print $2}')
+    local recommended_swap
+    
+    if [ "$swap_size" = "auto" ]; then
+        # Automatic sizing based on RAM
+        if [ "$mem_total_mb" -le 2048 ]; then
+            recommended_swap=$((mem_total_mb * 2))
+        elif [ "$mem_total_mb" -le 8192 ]; then
+            recommended_swap=$mem_total_mb
+        else
+            recommended_swap=8192
+        fi
+        
+        echo -e "${CYAN}System RAM: ${mem_total_mb}MB${NC}"
+        echo -e "${CYAN}Recommended swap: ${recommended_swap}MB${NC}"
+        echo ""
+        
+        read -rp "Enter swap size in MB (or press Enter for $recommended_swap): " input_size
+        swap_size="${input_size:-$recommended_swap}"
+    else
+        # Parse size argument (e.g., 4G, 2048M, 2048)
+        if [[ "$swap_size" =~ ^([0-9]+)[Gg]$ ]]; then
+            swap_size=$((${BASH_REMATCH[1]} * 1024))
+        elif [[ "$swap_size" =~ ^([0-9]+)[Mm]?$ ]]; then
+            swap_size="${BASH_REMATCH[1]}"
+        fi
+    fi
+    
+    # Check available disk space
+    local free_space_mb=$(($(df / --output=avail | tail -1) / 1024))
+    if [ "$swap_size" -gt "$((free_space_mb - 1024))" ]; then
+        print_error "Not enough disk space for ${swap_size}MB swap. Available: ${free_space_mb}MB"
+        return 1
+    fi
+    
+    print_step "Creating ${swap_size}MB swap file..."
+    sudo fallocate -l "${swap_size}M" /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count="$swap_size" status=progress
+    
+    print_step "Setting up swap..."
+    sudo chmod 600 /swapfile
+    sudo mkswap /swapfile
+    sudo swapon /swapfile
+    
+    # Make permanent
+    if ! grep -q "/swapfile" /etc/fstab; then
+        echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab > /dev/null
+    fi
+    
+    # Optimize swappiness for server
+    print_step "Optimizing swap settings..."
+    echo 'vm.swappiness=10' | sudo tee /etc/sysctl.d/99-swap.conf > /dev/null
+    echo 'vm.vfs_cache_pressure=50' | sudo tee -a /etc/sysctl.d/99-swap.conf > /dev/null
+    sudo sysctl -p /etc/sysctl.d/99-swap.conf > /dev/null
+    
+    print_success "Swap configured successfully!"
+    free -h | grep -E "Mem:|Swap:"
+    echo ""
 }
 
 # =============================================================================
@@ -708,6 +1296,181 @@ install_tools() {
     sudo NEEDRESTART_MODE=a apt install gnupg curl git zip unzip wget htop -y
     
     print_success "Additional tools installed successfully!"
+}
+
+install_postgresql() {
+    print_header "Installing PostgreSQL"
+    
+    # Version selection
+    echo -e "${CYAN}Select PostgreSQL version to install:${NC}"
+    local pg_versions=("16 (Latest)" "15" "14" "13" "12" "Default (OS package)")
+    local pg_version_nums=("16" "15" "14" "13" "12" "default")
+    
+    for i in "${!pg_versions[@]}"; do
+        echo "  $((i+1))) PostgreSQL ${pg_versions[$i]}"
+    done
+    
+    while true; do
+        read -rp "Enter your choice (1-${#pg_versions[@]}): " choice
+        if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#pg_versions[@]}" ]; then
+            postgresql_version="${pg_version_nums[$((choice-1))]}"
+            break
+        else
+            print_error "Invalid selection."
+        fi
+    done
+    
+    if [ "$postgresql_version" = "default" ]; then
+        print_step "Installing PostgreSQL from default repository..."
+        sudo NEEDRESTART_MODE=a apt install postgresql postgresql-contrib -y
+    else
+        print_step "Adding PostgreSQL official repository..."
+        sudo NEEDRESTART_MODE=a apt install wget gnupg2 -y
+        
+        # Add PostgreSQL repository
+        sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+        wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo apt-key add -
+        sudo apt update
+        
+        print_step "Installing PostgreSQL $postgresql_version..."
+        sudo NEEDRESTART_MODE=a apt install postgresql-$postgresql_version postgresql-contrib-$postgresql_version -y
+    fi
+    
+    # Start and enable service
+    print_step "Starting PostgreSQL service..."
+    sudo systemctl start postgresql
+    sudo systemctl enable postgresql
+    
+    # Create superuser
+    if prompt_yes_no "Would you like to create a PostgreSQL superuser?"; then
+        prompt_for_input "Enter PostgreSQL superuser username" pg_username
+        prompt_for_input "Enter PostgreSQL superuser password" pg_password
+        
+        print_step "Creating PostgreSQL superuser..."
+        sudo -u postgres psql -c "CREATE USER $pg_username WITH SUPERUSER CREATEDB CREATEROLE PASSWORD '$pg_password';"
+        print_success "User '$pg_username' created successfully!"
+    fi
+    
+    # Configure for remote access (optional)
+    if prompt_yes_no "Allow remote connections? (not recommended for production without SSL)"; then
+        local pg_conf_dir=$(sudo -u postgres psql -t -P format=unaligned -c 'SHOW config_file' | xargs dirname)
+        
+        # Update postgresql.conf
+        sudo sed -i "s/#listen_addresses = 'localhost'/listen_addresses = '*'/" "$pg_conf_dir/postgresql.conf"
+        
+        # Update pg_hba.conf
+        echo "host    all             all             0.0.0.0/0               scram-sha-256" | sudo tee -a "$pg_conf_dir/pg_hba.conf" > /dev/null
+        
+        # Open firewall
+        sudo ufw allow 5432/tcp
+        
+        sudo systemctl restart postgresql
+        print_warning "Remote access enabled. Make sure to secure with SSL in production!"
+    fi
+    
+    print_success "PostgreSQL installed successfully!"
+    echo ""
+    echo -e "${CYAN}PostgreSQL Information:${NC}"
+    echo "  Version: $(psql --version)"
+    echo "  Port: 5432"
+    echo "  Config: /etc/postgresql/*/main/postgresql.conf"
+    echo "  Connect: sudo -u postgres psql"
+    echo ""
+}
+
+install_redis() {
+    print_header "Installing Redis"
+    
+    # Installation method selection
+    echo -e "${CYAN}Select Redis installation method:${NC}"
+    echo "  1) Default (OS package)"
+    echo "  2) Redis official repository (latest)"
+    read -rp "Enter your choice (1-2): " redis_choice
+    
+    if [ "$redis_choice" = "2" ]; then
+        print_step "Adding Redis official repository..."
+        curl -fsSL https://packages.redis.io/gpg | sudo gpg --dearmor -o /usr/share/keyrings/redis-archive-keyring.gpg
+        echo "deb [signed-by=/usr/share/keyrings/redis-archive-keyring.gpg] https://packages.redis.io/deb $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/redis.list > /dev/null
+        sudo apt update
+    fi
+    
+    print_step "Installing Redis..."
+    sudo NEEDRESTART_MODE=a apt install redis-server -y
+    
+    # Configure Redis
+    print_step "Configuring Redis..."
+    local redis_conf="/etc/redis/redis.conf"
+    
+    # Enable systemd supervision
+    sudo sed -i 's/^supervised no/supervised systemd/' "$redis_conf"
+    
+    # Set max memory (default 256MB)
+    if prompt_yes_no "Configure max memory limit?"; then
+        read -rp "Enter max memory (e.g., 256mb, 1gb) [256mb]: " redis_maxmem
+        redis_maxmem="${redis_maxmem:-256mb}"
+        
+        if grep -q "^maxmemory " "$redis_conf"; then
+            sudo sed -i "s/^maxmemory .*/maxmemory $redis_maxmem/" "$redis_conf"
+        else
+            echo "maxmemory $redis_maxmem" | sudo tee -a "$redis_conf" > /dev/null
+        fi
+        
+        # Set eviction policy
+        if grep -q "^maxmemory-policy " "$redis_conf"; then
+            sudo sed -i "s/^maxmemory-policy .*/maxmemory-policy allkeys-lru/" "$redis_conf"
+        else
+            echo "maxmemory-policy allkeys-lru" | sudo tee -a "$redis_conf" > /dev/null
+        fi
+    fi
+    
+    # Set password (optional)
+    if prompt_yes_no "Set Redis password? (recommended)"; then
+        prompt_for_input "Enter Redis password" redis_password
+        
+        if grep -q "^requirepass " "$redis_conf"; then
+            sudo sed -i "s/^requirepass .*/requirepass $redis_password/" "$redis_conf"
+        else
+            echo "requirepass $redis_password" | sudo tee -a "$redis_conf" > /dev/null
+        fi
+        print_success "Redis password set."
+    fi
+    
+    # Allow remote connections (optional)
+    if prompt_yes_no "Allow remote connections?"; then
+        sudo sed -i 's/^bind 127.0.0.1/bind 0.0.0.0/' "$redis_conf"
+        sudo ufw allow 6379/tcp
+        print_warning "Remote access enabled. Make sure to set a strong password!"
+    fi
+    
+    # Start service
+    print_step "Starting Redis service..."
+    sudo systemctl restart redis-server
+    sudo systemctl enable redis-server
+    
+    # Verify installation
+    if redis-cli ping 2>/dev/null | grep -q "PONG"; then
+        print_success "Redis installed and running!"
+    else
+        print_success "Redis installed! (May need password for ping)"
+    fi
+    
+    echo ""
+    echo -e "${CYAN}Redis Information:${NC}"
+    echo "  Version: $(redis-server --version | awk '{print $3}' | cut -d'=' -f2)"
+    echo "  Port: 6379"
+    echo "  Config: /etc/redis/redis.conf"
+    echo "  CLI: redis-cli"
+    echo ""
+    
+    # Install PHP Redis extension if PHP is installed
+    if [ -n "$php_version" ]; then
+        if prompt_yes_no "Install PHP Redis extension?"; then
+            print_step "Installing PHP Redis extension..."
+            sudo NEEDRESTART_MODE=a apt install php$php_version-redis -y
+            sudo systemctl restart php$php_version-fpm 2>/dev/null || true
+            print_success "PHP Redis extension installed!"
+        fi
+    fi
 }
 
 install_docker() {
@@ -1460,6 +2223,69 @@ uninstall_tools() {
     print_success "Additional tools removed successfully!"
 }
 
+uninstall_postgresql() {
+    print_header "Removing PostgreSQL"
+    
+    if ! command -v psql &> /dev/null; then
+        print_warning "PostgreSQL is not installed."
+        return 0
+    fi
+    
+    print_step "Stopping PostgreSQL service..."
+    sudo systemctl stop postgresql 2>/dev/null || true
+    sudo systemctl disable postgresql 2>/dev/null || true
+    
+    if prompt_yes_no "Remove PostgreSQL data (all databases)?"; then
+        print_step "Removing PostgreSQL packages and data..."
+        sudo apt purge postgresql* -y
+        sudo rm -rf /var/lib/postgresql
+        sudo rm -rf /etc/postgresql
+        print_success "PostgreSQL data removed."
+    else
+        print_step "Removing PostgreSQL packages (keeping data)..."
+        sudo apt purge postgresql* -y
+    fi
+    
+    sudo apt autoremove -y
+    
+    # Remove repository
+    sudo rm -f /etc/apt/sources.list.d/pgdg.list
+    
+    print_success "PostgreSQL removed successfully!"
+}
+
+uninstall_redis() {
+    print_header "Removing Redis"
+    
+    if ! command -v redis-server &> /dev/null; then
+        print_warning "Redis is not installed."
+        return 0
+    fi
+    
+    print_step "Stopping Redis service..."
+    sudo systemctl stop redis-server 2>/dev/null || true
+    sudo systemctl disable redis-server 2>/dev/null || true
+    
+    if prompt_yes_no "Remove Redis data?"; then
+        print_step "Removing Redis packages and data..."
+        sudo apt purge redis-server redis-tools -y
+        sudo rm -rf /var/lib/redis
+        sudo rm -rf /etc/redis
+        print_success "Redis data removed."
+    else
+        print_step "Removing Redis packages (keeping data)..."
+        sudo apt purge redis-server redis-tools -y
+    fi
+    
+    sudo apt autoremove -y
+    
+    # Remove repository
+    sudo rm -f /etc/apt/sources.list.d/redis.list
+    sudo rm -f /usr/share/keyrings/redis-archive-keyring.gpg
+    
+    print_success "Redis removed successfully!"
+}
+
 # =============================================================================
 # Removal Menu Functions
 # =============================================================================
@@ -1476,17 +2302,19 @@ show_removal_menu() {
     echo ""
     echo -e "  ${YELLOW}Databases:${NC}"
     echo "  3) MySQL"
-    echo "  4) MongoDB (native)"
-    echo "  5) MongoDB (Docker)"
+    echo "  4) PostgreSQL"
+    echo "  5) MongoDB (native)"
+    echo "  6) MongoDB (Docker)"
+    echo "  7) Redis"
     echo ""
     echo -e "  ${YELLOW}Languages & Runtimes:${NC}"
-    echo "  6) PHP"
-    echo "  7) Node.js"
+    echo "  8) PHP"
+    echo "  9) Node.js"
     echo ""
     echo -e "  ${YELLOW}Containers & Utilities:${NC}"
-    echo "  8) Docker"
-    echo "  9) Certbot"
-    echo "  10) Additional Tools"
+    echo "  10) Docker"
+    echo "  11) Certbot"
+    echo "  12) Additional Tools"
     echo ""
     echo -e "  ${RED}X) Remove ALL components${NC}"
     echo "  S) Select multiple components"
@@ -1503,20 +2331,24 @@ run_removal() {
             1) uninstall_apache ;;
             2) uninstall_nginx ;;
             3) uninstall_mysql ;;
-            4) uninstall_mongodb ;;
-            5) uninstall_mongodb_docker ;;
-            6) uninstall_php ;;
-            7) uninstall_nodejs ;;
-            8) uninstall_docker ;;
-            9) uninstall_certbot ;;
-            10) uninstall_tools ;;
+            4) uninstall_postgresql ;;
+            5) uninstall_mongodb ;;
+            6) uninstall_mongodb_docker ;;
+            7) uninstall_redis ;;
+            8) uninstall_php ;;
+            9) uninstall_nodejs ;;
+            10) uninstall_docker ;;
+            11) uninstall_certbot ;;
+            12) uninstall_tools ;;
             [Xx])
                 print_header "Remove ALL Components"
                 echo -e "${RED}This will remove ALL installed components and their data!${NC}"
                 if prompt_yes_no "Are you absolutely sure?"; then
                     uninstall_certbot
+                    uninstall_redis
                     uninstall_mongodb_docker
                     uninstall_mongodb
+                    uninstall_postgresql
                     uninstall_nodejs
                     uninstall_php
                     uninstall_mysql
@@ -1614,13 +2446,11 @@ selective_removal() {
     
     print_success "Selected components removed successfully!"
 }
-
-# =============================================================================
 # Main Menu
 # =============================================================================
 
 show_main_menu() {
-    print_header "Web Server Setup Script"
+    print_header "Ubuntu Server Setup Script v$SCRIPT_VERSION"
     
     echo -e "${CYAN}Select components to install:${NC}"
     echo ""
@@ -1630,21 +2460,25 @@ show_main_menu() {
     echo ""
     echo -e "  ${YELLOW}Databases:${NC}"
     echo "  3) MySQL Database Server"
-    echo "  4) MongoDB (native installation)"
-    echo "  5) MongoDB via Docker (recommended for compatibility)"
+    echo "  4) PostgreSQL Database Server"
+    echo "  5) MongoDB (native installation)"
+    echo "  6) MongoDB via Docker (recommended)"
+    echo "  7) Redis Cache Server"
     echo ""
     echo -e "  ${YELLOW}Languages & Runtimes:${NC}"
-    echo "  6) PHP (with version selection)"
-    echo "  7) Node.js (with version selection)"
+    echo "  8) PHP (with version selection)"
+    echo "  9) Node.js (with version selection)"
     echo ""
     echo -e "  ${YELLOW}Containers & Utilities:${NC}"
-    echo "  8) Docker"
-    echo "  9) Certbot (SSL Certificates)"
-    echo "  10) Additional Tools (git, curl, zip, etc.)"
+    echo "  10) Docker"
+    echo "  11) Certbot (SSL Certificates)"
+    echo "  12) Additional Tools (git, curl, zip, etc.)"
     echo ""
     echo "  A) Install ALL components (Apache + all others)"
     echo "  N) Install ALL components (Nginx + all others)"
     echo "  C) Custom selection"
+    echo "  T) Server status"
+    echo "  W) Configure swap"
     echo ""
     echo -e "  ${RED}R) Remove components${NC}"
     echo "  Q) Quit"
@@ -1667,6 +2501,8 @@ custom_selection() {
     
     echo -e "\n${YELLOW}Databases:${NC}"
     prompt_yes_no "Install MySQL Database Server?" && INSTALL_MYSQL=true
+    prompt_yes_no "Install PostgreSQL Database Server?" && INSTALL_POSTGRESQL=true
+    prompt_yes_no "Install Redis Cache Server?" && INSTALL_REDIS=true
     
     # MongoDB installation choice
     if prompt_yes_no "Install MongoDB?"; then
@@ -1702,6 +2538,8 @@ show_selection_summary() {
     [ "$INSTALL_APACHE" = true ] && echo -e "  ${GREEN}✔${NC} Apache (HTTPD) Web Server"
     [ "$INSTALL_NGINX" = true ] && echo -e "  ${GREEN}✔${NC} Nginx Web Server"
     [ "$INSTALL_MYSQL" = true ] && echo -e "  ${GREEN}✔${NC} MySQL Database Server"
+    [ "$INSTALL_POSTGRESQL" = true ] && echo -e "  ${GREEN}✔${NC} PostgreSQL Database Server"
+    [ "$INSTALL_REDIS" = true ] && echo -e "  ${GREEN}✔${NC} Redis Cache Server"
     [ "$INSTALL_MONGODB" = true ] && echo -e "  ${GREEN}✔${NC} MongoDB (native)"
     [ "$INSTALL_MONGODB_DOCKER" = true ] && echo -e "  ${GREEN}✔${NC} MongoDB (Docker)"
     [ "$INSTALL_DOCKER" = true ] && echo -e "  ${GREEN}✔${NC} Docker"
@@ -1724,6 +2562,8 @@ run_installation() {
     [ "$INSTALL_APACHE" = true ] && install_apache
     [ "$INSTALL_NGINX" = true ] && install_nginx
     [ "$INSTALL_MYSQL" = true ] && install_mysql
+    [ "$INSTALL_POSTGRESQL" = true ] && install_postgresql
+    [ "$INSTALL_REDIS" = true ] && install_redis
     [ "$INSTALL_PHP" = true ] && install_php
     [ "$INSTALL_MONGODB" = true ] && install_mongodb
     [ "$INSTALL_MONGODB_DOCKER" = true ] && install_mongodb_docker
@@ -1761,6 +2601,8 @@ run_installation() {
     [ "$INSTALL_APACHE" = true ] && echo "  Apache: $(apache2 -v 2>/dev/null | head -1)"
     [ "$INSTALL_NGINX" = true ] && echo "  Nginx: $(nginx -v 2>&1)"
     [ "$INSTALL_MYSQL" = true ] && echo "  MySQL: $(mysql --version 2>/dev/null)"
+    [ "$INSTALL_POSTGRESQL" = true ] && echo "  PostgreSQL: $(psql --version 2>/dev/null)"
+    [ "$INSTALL_REDIS" = true ] && echo "  Redis: $(redis-server --version 2>/dev/null | awk '{print $3}')"
     [ "$INSTALL_PHP" = true ] && echo "  PHP: $(php -v 2>/dev/null | head -1)"
     [ "$INSTALL_MONGODB" = true ] && echo "  MongoDB: $(mongod --version 2>/dev/null | head -1)"
     [ "$INSTALL_MONGODB_DOCKER" = true ] && echo "  MongoDB (Docker): Running in container"
@@ -1768,12 +2610,27 @@ run_installation() {
     [ "$INSTALL_NODEJS" = true ] && echo "  Node.js: $(node -v 2>/dev/null)"
     echo ""
 }
-
-# =============================================================================
 # Main Script Execution
 # =============================================================================
 
 main() {
+    # Parse command-line arguments
+    parse_args "$@"
+    
+    # If not interactive mode (CLI args provided), run installation directly
+    if [ "$INTERACTIVE_MODE" = false ]; then
+        preflight_checks
+        show_selection_summary
+        if [ "$AUTO_CONFIRM" = true ] || prompt_yes_no "Proceed with installation?"; then
+            run_installation
+        else
+            echo -e "\n${YELLOW}Installation cancelled.${NC}\n"
+            exit 0
+        fi
+        exit 0
+    fi
+    
+    # Interactive mode
     # Check if running as root
     if [ "$EUID" -eq 0 ]; then
         print_warning "Running as root. Some operations might behave differently."
@@ -1794,24 +2651,30 @@ main() {
                 INSTALL_MYSQL=true
                 ;;
             4)
-                INSTALL_MONGODB=true
+                INSTALL_POSTGRESQL=true
                 ;;
             5)
-                INSTALL_MONGODB_DOCKER=true
+                INSTALL_MONGODB=true
                 ;;
             6)
-                INSTALL_PHP=true
+                INSTALL_MONGODB_DOCKER=true
                 ;;
             7)
-                INSTALL_NODEJS=true
+                INSTALL_REDIS=true
                 ;;
             8)
-                INSTALL_DOCKER=true
+                INSTALL_PHP=true
                 ;;
             9)
-                INSTALL_CERTBOT=true
+                INSTALL_NODEJS=true
                 ;;
             10)
+                INSTALL_DOCKER=true
+                ;;
+            11)
+                INSTALL_CERTBOT=true
+                ;;
+            12)
                 INSTALL_TOOLS=true
                 ;;
             [Aa])
@@ -1837,6 +2700,16 @@ main() {
             [Cc])
                 custom_selection
                 ;;
+            [Tt])
+                show_status
+                read -rp "Press Enter to continue..."
+                continue
+                ;;
+            [Ww])
+                setup_swap
+                read -rp "Press Enter to continue..."
+                continue
+                ;;
             [Rr])
                 run_removal
                 continue
@@ -1852,7 +2725,7 @@ main() {
         esac
         
         # If a single component was selected, ask if user wants to add more
-        if [[ "$main_choice" =~ ^([1-9]|10)$ ]]; then
+        if [[ "$main_choice" =~ ^([1-9]|1[0-2])$ ]]; then
             if prompt_yes_no "Would you like to select additional components?"; then
                 continue
             fi
@@ -1860,6 +2733,9 @@ main() {
         
         break
     done
+    
+    # Run pre-flight checks
+    preflight_checks
     
     # Show summary and confirm
     show_selection_summary
@@ -1872,5 +2748,5 @@ main() {
     fi
 }
 
-# Run the main function
-main
+# Run the main function with all arguments
+main "$@"
