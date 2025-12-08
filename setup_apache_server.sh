@@ -14,6 +14,7 @@ NC='\033[0m' # No Color
 
 # Installation flags (default: not selected)
 INSTALL_APACHE=false
+INSTALL_NGINX=false
 INSTALL_MYSQL=false
 INSTALL_PHP=false
 INSTALL_MONGODB=false
@@ -162,7 +163,7 @@ update_mysql_config() {
 # =============================================================================
 
 install_apache() {
-    print_header "Installing Apache Web Server"
+    print_header "Installing Apache (HTTPD) Web Server"
     
     print_step "Installing Apache..."
     sudo NEEDRESTART_MODE=a apt install apache2 -y
@@ -184,7 +185,39 @@ install_apache() {
     sudo a2enmod proxy_balancer proxy_connect proxy_html ssl
     
     sudo systemctl restart apache2
-    print_success "Apache installed successfully!"
+    print_success "Apache (HTTPD) installed successfully!"
+}
+
+install_nginx() {
+    print_header "Installing Nginx Web Server"
+    
+    print_step "Installing Nginx..."
+    sudo NEEDRESTART_MODE=a apt install nginx -y
+    
+    print_step "Setting up firewall..."
+    sudo NEEDRESTART_MODE=a apt install ufw -y
+    sudo ufw allow 'Nginx Full'
+    sudo ufw allow ssh
+    sudo ufw allow OpenSSH
+    sudo ufw allow 80/tcp
+    sudo ufw allow 443/tcp
+    sudo ufw allow 587/tcp
+    sudo ufw allow 465/tcp
+    sudo ufw allow 25/tcp
+    yes | sudo ufw enable
+    
+    print_step "Creating Nginx configuration directories..."
+    sudo mkdir -p /etc/nginx/sites-available
+    sudo mkdir -p /etc/nginx/sites-enabled
+    
+    # Ensure sites-enabled is included in nginx.conf
+    if ! grep -q "sites-enabled" /etc/nginx/nginx.conf; then
+        sudo sed -i '/http {/a \    include /etc/nginx/sites-enabled/*;' /etc/nginx/nginx.conf
+    fi
+    
+    sudo systemctl enable nginx
+    sudo systemctl start nginx
+    print_success "Nginx installed successfully!"
 }
 
 install_mysql() {
@@ -268,18 +301,33 @@ install_php() {
     print_step "Enabling PHP modules..."
     sudo phpenmod mbstring
     
+    print_step "Installing PHP-FPM..."
+    sudo NEEDRESTART_MODE=a apt install php$php_version-fpm -y
+    sudo systemctl start php$php_version-fpm
+    sudo systemctl enable php$php_version-fpm
+    
     if [ "$INSTALL_APACHE" = true ]; then
-        print_step "Enabling HTTP/2 with PHP-FPM..."
+        print_step "Enabling HTTP/2 with PHP-FPM for Apache..."
         sudo a2enmod http2
         sudo a2dismod php$php_version 2>/dev/null || true
         sudo a2dismod mpm_prefork 2>/dev/null || true
         sudo a2enmod mpm_event proxy_fcgi setenvif
-        sudo NEEDRESTART_MODE=a apt install php$php_version-fpm -y
-        sudo systemctl start php$php_version-fpm
         sudo a2enconf php$php_version-fpm
-    else
-        sudo NEEDRESTART_MODE=a apt install php$php_version-fpm -y
-        sudo systemctl start php$php_version-fpm
+    fi
+    
+    if [ "$INSTALL_NGINX" = true ]; then
+        print_step "Configuring PHP-FPM for Nginx..."
+        # Create a basic PHP configuration for Nginx
+        cat <<EOF | sudo tee /etc/nginx/snippets/php-fpm.conf > /dev/null
+location ~ \.php\$ {
+    include snippets/fastcgi-php.conf;
+    fastcgi_pass unix:/var/run/php/php$php_version-fpm.sock;
+    fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
+    include fastcgi_params;
+}
+EOF
+        sudo mkdir -p /etc/nginx/snippets
+        print_success "PHP-FPM configured for Nginx. Include 'snippets/php-fpm.conf' in your server blocks."
     fi
     
     php_ini_file="/etc/php/$php_version/fpm/php.ini"
@@ -311,6 +359,7 @@ install_php() {
     
     sudo systemctl restart php$php_version-fpm
     [ "$INSTALL_APACHE" = true ] && sudo systemctl restart apache2
+    [ "$INSTALL_NGINX" = true ] && sudo systemctl restart nginx
     
     print_success "PHP $php_version installed successfully!"
 }
@@ -415,7 +464,25 @@ install_certbot() {
     print_header "Installing Certbot (SSL Certificates)"
     
     print_step "Installing Certbot..."
-    sudo NEEDRESTART_MODE=a apt install certbot python3-certbot-apache -y
+    sudo NEEDRESTART_MODE=a apt install certbot -y
+    
+    # Install web server specific plugins
+    if [ "$INSTALL_APACHE" = true ]; then
+        print_step "Installing Certbot Apache plugin..."
+        sudo NEEDRESTART_MODE=a apt install python3-certbot-apache -y
+    fi
+    
+    if [ "$INSTALL_NGINX" = true ]; then
+        print_step "Installing Certbot Nginx plugin..."
+        sudo NEEDRESTART_MODE=a apt install python3-certbot-nginx -y
+    fi
+    
+    # If no web server selected, install both plugins
+    if [ "$INSTALL_APACHE" = false ] && [ "$INSTALL_NGINX" = false ]; then
+        print_step "Installing Certbot plugins for Apache and Nginx..."
+        sudo NEEDRESTART_MODE=a apt install python3-certbot-apache python3-certbot-nginx -y
+    fi
+    
     sudo certbot plugins
     
     print_step "Setting up auto-renewal cron job..."
@@ -439,19 +506,28 @@ install_tools() {
 # =============================================================================
 
 show_main_menu() {
-    print_header "Apache Server Setup Script"
+    print_header "Web Server Setup Script"
     
     echo -e "${CYAN}Select components to install:${NC}"
     echo ""
-    echo "  1) Apache Web Server"
-    echo "  2) MySQL Database Server"
-    echo "  3) PHP (with version selection)"
-    echo "  4) MongoDB (with version selection)"
-    echo "  5) Node.js (with version selection)"
-    echo "  6) Certbot (SSL Certificates)"
-    echo "  7) Additional Tools (git, curl, zip, etc.)"
+    echo -e "  ${YELLOW}Web Servers:${NC}"
+    echo "  1) Apache (HTTPD) Web Server"
+    echo "  2) Nginx Web Server"
     echo ""
-    echo "  A) Install ALL components"
+    echo -e "  ${YELLOW}Databases:${NC}"
+    echo "  3) MySQL Database Server"
+    echo "  4) MongoDB (with version selection)"
+    echo ""
+    echo -e "  ${YELLOW}Languages & Runtimes:${NC}"
+    echo "  5) PHP (with version selection)"
+    echo "  6) Node.js (with version selection)"
+    echo ""
+    echo -e "  ${YELLOW}Utilities:${NC}"
+    echo "  7) Certbot (SSL Certificates)"
+    echo "  8) Additional Tools (git, curl, zip, etc.)"
+    echo ""
+    echo "  A) Install ALL components (Apache + all others)"
+    echo "  N) Install ALL components (Nginx + all others)"
     echo "  C) Custom selection"
     echo "  Q) Quit"
     echo ""
@@ -462,11 +538,24 @@ custom_selection() {
     
     echo -e "${CYAN}Select which components to install (answer y/n for each):${NC}\n"
     
-    prompt_yes_no "Install Apache Web Server?" && INSTALL_APACHE=true
+    echo -e "${YELLOW}Web Servers:${NC}"
+    prompt_yes_no "Install Apache (HTTPD) Web Server?" && INSTALL_APACHE=true
+    prompt_yes_no "Install Nginx Web Server?" && INSTALL_NGINX=true
+    
+    # Warn if both web servers are selected
+    if [ "$INSTALL_APACHE" = true ] && [ "$INSTALL_NGINX" = true ]; then
+        print_warning "Both Apache and Nginx selected. They will run on different ports or you'll need to configure them manually."
+    fi
+    
+    echo -e "\n${YELLOW}Databases:${NC}"
     prompt_yes_no "Install MySQL Database Server?" && INSTALL_MYSQL=true
-    prompt_yes_no "Install PHP?" && INSTALL_PHP=true
     prompt_yes_no "Install MongoDB?" && INSTALL_MONGODB=true
+    
+    echo -e "\n${YELLOW}Languages & Runtimes:${NC}"
+    prompt_yes_no "Install PHP?" && INSTALL_PHP=true
     prompt_yes_no "Install Node.js?" && INSTALL_NODEJS=true
+    
+    echo -e "\n${YELLOW}Utilities:${NC}"
     prompt_yes_no "Install Certbot (SSL)?" && INSTALL_CERTBOT=true
     prompt_yes_no "Install Additional Tools?" && INSTALL_TOOLS=true
 }
@@ -476,10 +565,11 @@ show_selection_summary() {
     
     echo -e "${CYAN}The following components will be installed:${NC}\n"
     
-    [ "$INSTALL_APACHE" = true ] && echo -e "  ${GREEN}✔${NC} Apache Web Server"
+    [ "$INSTALL_APACHE" = true ] && echo -e "  ${GREEN}✔${NC} Apache (HTTPD) Web Server"
+    [ "$INSTALL_NGINX" = true ] && echo -e "  ${GREEN}✔${NC} Nginx Web Server"
     [ "$INSTALL_MYSQL" = true ] && echo -e "  ${GREEN}✔${NC} MySQL Database Server"
-    [ "$INSTALL_PHP" = true ] && echo -e "  ${GREEN}✔${NC} PHP"
     [ "$INSTALL_MONGODB" = true ] && echo -e "  ${GREEN}✔${NC} MongoDB"
+    [ "$INSTALL_PHP" = true ] && echo -e "  ${GREEN}✔${NC} PHP"
     [ "$INSTALL_NODEJS" = true ] && echo -e "  ${GREEN}✔${NC} Node.js"
     [ "$INSTALL_CERTBOT" = true ] && echo -e "  ${GREEN}✔${NC} Certbot"
     [ "$INSTALL_TOOLS" = true ] && echo -e "  ${GREEN}✔${NC} Additional Tools"
@@ -494,6 +584,7 @@ run_installation() {
     sudo apt update
     
     [ "$INSTALL_APACHE" = true ] && install_apache
+    [ "$INSTALL_NGINX" = true ] && install_nginx
     [ "$INSTALL_MYSQL" = true ] && install_mysql
     [ "$INSTALL_PHP" = true ] && install_php
     [ "$INSTALL_MONGODB" = true ] && install_mongodb
@@ -507,6 +598,11 @@ run_installation() {
     if [ "$INSTALL_APACHE" = true ]; then
         print_step "Restarting Apache..."
         sudo systemctl restart apache2
+    fi
+    
+    if [ "$INSTALL_NGINX" = true ]; then
+        print_step "Restarting Nginx..."
+        sudo systemctl restart nginx
     fi
     
     if [ "$INSTALL_PHP" = true ] && [ -n "$php_version" ]; then
@@ -524,6 +620,7 @@ run_installation() {
     # Show installed versions
     echo -e "${CYAN}Installed versions:${NC}"
     [ "$INSTALL_APACHE" = true ] && echo "  Apache: $(apache2 -v 2>/dev/null | head -1)"
+    [ "$INSTALL_NGINX" = true ] && echo "  Nginx: $(nginx -v 2>&1)"
     [ "$INSTALL_MYSQL" = true ] && echo "  MySQL: $(mysql --version 2>/dev/null)"
     [ "$INSTALL_PHP" = true ] && echo "  PHP: $(php -v 2>/dev/null | head -1)"
     [ "$INSTALL_MONGODB" = true ] && echo "  MongoDB: $(mongod --version 2>/dev/null | head -1)"
@@ -550,25 +647,37 @@ main() {
                 INSTALL_APACHE=true
                 ;;
             2)
-                INSTALL_MYSQL=true
+                INSTALL_NGINX=true
                 ;;
             3)
-                INSTALL_PHP=true
+                INSTALL_MYSQL=true
                 ;;
             4)
                 INSTALL_MONGODB=true
                 ;;
             5)
-                INSTALL_NODEJS=true
+                INSTALL_PHP=true
                 ;;
             6)
-                INSTALL_CERTBOT=true
+                INSTALL_NODEJS=true
                 ;;
             7)
+                INSTALL_CERTBOT=true
+                ;;
+            8)
                 INSTALL_TOOLS=true
                 ;;
             [Aa])
                 INSTALL_APACHE=true
+                INSTALL_MYSQL=true
+                INSTALL_PHP=true
+                INSTALL_MONGODB=true
+                INSTALL_NODEJS=true
+                INSTALL_CERTBOT=true
+                INSTALL_TOOLS=true
+                ;;
+            [Nn])
+                INSTALL_NGINX=true
                 INSTALL_MYSQL=true
                 INSTALL_PHP=true
                 INSTALL_MONGODB=true
@@ -590,7 +699,7 @@ main() {
         esac
         
         # If a single component was selected, ask if user wants to add more
-        if [[ "$main_choice" =~ ^[1-7]$ ]]; then
+        if [[ "$main_choice" =~ ^[1-8]$ ]]; then
             if prompt_yes_no "Would you like to select additional components?"; then
                 continue
             fi
