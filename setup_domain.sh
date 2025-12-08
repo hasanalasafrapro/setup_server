@@ -685,18 +685,27 @@ EOF
 setup_ssl() {
     local domain="$1"
     local web_server="$2"
+    local email=""
     
     if ! command -v certbot &> /dev/null; then
         print_warning "Certbot is not installed. Skipping SSL setup."
         return 1
     fi
     
+    # Prompt for email address
+    prompt_for_input "Enter email address for SSL certificate notifications" email
+    
+    # Validate email format (basic check)
+    if [[ ! "$email" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]; then
+        print_warning "Email format appears invalid, but continuing anyway..."
+    fi
+    
     print_step "Setting up SSL certificate for ${domain}..."
     
     if [ "$web_server" = "apache" ]; then
-        sudo certbot --apache -d "$domain" -d "www.${domain}" --non-interactive --agree-tos --redirect
+        sudo certbot --apache -d "$domain" -d "www.${domain}" --non-interactive --agree-tos --redirect --email "$email"
     elif [ "$web_server" = "nginx" ]; then
-        sudo certbot --nginx -d "$domain" -d "www.${domain}" --non-interactive --agree-tos --redirect
+        sudo certbot --nginx -d "$domain" -d "www.${domain}" --non-interactive --agree-tos --redirect --email "$email"
     fi
     
     if [ $? -eq 0 ]; then
