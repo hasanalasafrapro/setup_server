@@ -265,113 +265,190 @@ install_mysql() {
 install_php() {
     print_header "Installing PHP"
     
-    # PHP version selection
-    echo -e "${CYAN}Select PHP version to install:${NC}"
-    local php_versions=("8.4" "8.3" "8.2" "8.1" "8.0" "7.4" "Custom")
+    # Available PHP versions
+    local available_versions=("8.4" "8.3" "8.2" "8.1" "8.0" "7.4" "7.3" "7.2")
+    local selected_versions=()
     
-    for i in "${!php_versions[@]}"; do
-        echo "  $((i+1))) PHP ${php_versions[$i]}"
-    done
+    # Ask for installation mode
+    echo -e "${CYAN}PHP Installation Mode:${NC}"
+    echo "  1) Install single PHP version"
+    echo "  2) Install multiple PHP versions"
+    read -rp "Enter your choice (1-2): " install_mode
     
-    while true; do
-        read -rp "Enter your choice (1-${#php_versions[@]}): " choice
-        if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#php_versions[@]}" ]; then
-            if [ "$choice" -eq "${#php_versions[@]}" ]; then
-                prompt_for_input "Enter custom PHP version (e.g., 8.2)" php_version
-            else
-                php_version="${php_versions[$((choice-1))]}"
+    if [ "$install_mode" = "2" ]; then
+        # Multiple version selection
+        echo ""
+        echo -e "${CYAN}Select PHP versions to install (y/n for each):${NC}"
+        echo -e "${YELLOW}You can install multiple versions side by side.${NC}\n"
+        
+        for ver in "${available_versions[@]}"; do
+            if prompt_yes_no "Install PHP $ver?"; then
+                selected_versions+=("$ver")
             fi
-            break
-        else
-            print_error "Invalid selection."
+        done
+        
+        if prompt_yes_no "Add a custom PHP version?"; then
+            local custom_ver
+            prompt_for_input "Enter custom PHP version (e.g., 7.1)" custom_ver
+            selected_versions+=("$custom_ver")
         fi
+        
+        if [ ${#selected_versions[@]} -eq 0 ]; then
+            print_error "No PHP versions selected."
+            return 1
+        fi
+    else
+        # Single version selection
+        echo ""
+        echo -e "${CYAN}Select PHP version to install:${NC}"
+        
+        for i in "${!available_versions[@]}"; do
+            echo "  $((i+1))) PHP ${available_versions[$i]}"
+        done
+        echo "  $((${#available_versions[@]}+1))) Custom version"
+        
+        while true; do
+            read -rp "Enter your choice (1-$((${#available_versions[@]}+1))): " choice
+            if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "$((${#available_versions[@]}+1))" ]; then
+                if [ "$choice" -eq "$((${#available_versions[@]}+1))" ]; then
+                    prompt_for_input "Enter custom PHP version (e.g., 8.2)" php_version
+                    selected_versions+=("$php_version")
+                else
+                    selected_versions+=("${available_versions[$((choice-1))]}")
+                fi
+                break
+            else
+                print_error "Invalid selection."
+            fi
+        done
+    fi
+    
+    # Show selected versions
+    echo ""
+    echo -e "${CYAN}PHP versions to install:${NC}"
+    for ver in "${selected_versions[@]}"; do
+        echo -e "  ${GREEN}✔${NC} PHP $ver"
     done
+    echo ""
     
     print_step "Adding PHP repository..."
     yes | sudo add-apt-repository ppa:ondrej/php
     sudo apt update
     
-    print_step "Installing PHP $php_version and modules..."
-    sudo NEEDRESTART_MODE=a apt install php$php_version -y
-    sudo NEEDRESTART_MODE=a apt install php$php_version-common php$php_version-mysql php$php_version-xml \
-        php$php_version-xmlrpc php$php_version-curl php$php_version-gd php$php_version-imagick \
-        php$php_version-cli php$php_version-dev php$php_version-imap php$php_version-mbstring \
-        php$php_version-opcache php$php_version-soap php$php_version-zip php$php_version-intl \
-        php$php_version-bcmath php-pear -y
+    # Install each selected PHP version
+    for ver in "${selected_versions[@]}"; do
+        print_header "Installing PHP $ver"
+        
+        print_step "Installing PHP $ver and modules..."
+        sudo NEEDRESTART_MODE=a apt install php$ver -y
+        sudo NEEDRESTART_MODE=a apt install php$ver-common php$ver-mysql php$ver-xml \
+            php$ver-xmlrpc php$ver-curl php$ver-gd php$ver-imagick \
+            php$ver-cli php$ver-dev php$ver-imap php$ver-mbstring \
+            php$ver-opcache php$ver-soap php$ver-zip php$ver-intl \
+            php$ver-bcmath -y 2>/dev/null || print_warning "Some modules may not be available for PHP $ver"
+        
+        if [ "$INSTALL_APACHE" = true ]; then
+            sudo NEEDRESTART_MODE=a apt install libapache2-mod-php$ver -y 2>/dev/null || true
+        fi
+        
+        print_step "Installing PHP $ver FPM..."
+        sudo NEEDRESTART_MODE=a apt install php$ver-fpm -y
+        sudo systemctl start php$ver-fpm
+        sudo systemctl enable php$ver-fpm
+        
+        # Configure PHP settings
+        local php_ini="/etc/php/$ver/fpm/php.ini"
+        local php_fpm="/etc/php/$ver/fpm/pool.d/www.conf"
+        
+        if [ -f "$php_ini" ]; then
+            print_step "Configuring PHP $ver settings..."
+            update_php_config "upload_max_filesize" "64M" "$php_ini"
+            update_php_config "post_max_size" "64M" "$php_ini"
+            update_php_config "memory_limit" "256M" "$php_ini"
+            update_php_config "max_execution_time" "600" "$php_ini"
+            update_php_config "max_input_time" "600" "$php_ini"
+            update_php_config "max_input_vars" "10000" "$php_ini"
+            add_php_extension "opcache.so" "$php_ini"
+            update_php_config "opcache.enable" "1" "$php_ini"
+            update_php_config "opcache.memory_consumption" "128" "$php_ini"
+        fi
+        
+        if [ -f "$php_fpm" ]; then
+            update_php_config "pm" "dynamic" "$php_fpm"
+            update_php_config "pm.max_children" "6" "$php_fpm"
+            update_php_config "pm.start_servers" "2" "$php_fpm"
+        fi
+        
+        sudo systemctl restart php$ver-fpm
+        print_success "PHP $ver installed!"
+    done
     
-    # Only install Apache PHP module if Apache is selected
-    if [ "$INSTALL_APACHE" = true ]; then
-        print_step "Installing Apache PHP module..."
-        sudo NEEDRESTART_MODE=a apt install libapache2-mod-php$php_version -y
+    # Set default version
+    php_version="${selected_versions[0]}"
+    
+    if [ ${#selected_versions[@]} -gt 1 ]; then
+        echo ""
+        echo -e "${CYAN}Select default PHP version for CLI:${NC}"
+        for i in "${!selected_versions[@]}"; do
+            echo "  $((i+1))) PHP ${selected_versions[$i]}"
+        done
+        read -rp "Enter choice (1-${#selected_versions[@]}): " def_choice
+        if [[ "$def_choice" =~ ^[0-9]+$ ]] && [ "$def_choice" -ge 1 ] && [ "$def_choice" -le "${#selected_versions[@]}" ]; then
+            php_version="${selected_versions[$((def_choice-1))]}"
+        fi
+        
+        sudo update-alternatives --set php /usr/bin/php$php_version 2>/dev/null || true
+        
+        # Create switch script
+        print_step "Creating PHP switch script..."
+        sudo tee /usr/local/bin/php-switch > /dev/null << 'SWITCHEOF'
+#!/bin/bash
+VERSION="$1"
+if [ -z "$VERSION" ]; then
+    echo "Usage: php-switch <version>"
+    echo "Current: $(php -v | head -1)"
+    exit 1
+fi
+sudo update-alternatives --set php /usr/bin/php$VERSION 2>/dev/null || { echo "PHP $VERSION not found"; exit 1; }
+echo "Switched to PHP $VERSION"
+php -v | head -1
+SWITCHEOF
+        sudo chmod +x /usr/local/bin/php-switch
     fi
     
-    sudo NEEDRESTART_MODE=a apt install autoconf g++ make openssl libssl3 libssl-dev \
-        libcurl4-openssl-dev pkg-config libsasl2-dev libpcre3-dev -y
-    
-    print_step "Enabling PHP modules..."
-    sudo phpenmod mbstring
-    
-    print_step "Installing PHP-FPM..."
-    sudo NEEDRESTART_MODE=a apt install php$php_version-fpm -y
-    sudo systemctl start php$php_version-fpm
-    sudo systemctl enable php$php_version-fpm
-    
+    # Configure web server
     if [ "$INSTALL_APACHE" = true ]; then
-        print_step "Enabling HTTP/2 with PHP-FPM for Apache..."
-        sudo a2enmod http2
-        sudo a2dismod php$php_version 2>/dev/null || true
+        sudo a2enmod http2 mpm_event proxy_fcgi setenvif
         sudo a2dismod mpm_prefork 2>/dev/null || true
-        sudo a2enmod mpm_event proxy_fcgi setenvif
         sudo a2enconf php$php_version-fpm
+        sudo systemctl restart apache2
     fi
     
     if [ "$INSTALL_NGINX" = true ]; then
-        print_step "Configuring PHP-FPM for Nginx..."
-        # Create a basic PHP configuration for Nginx
-        cat <<EOF | sudo tee /etc/nginx/snippets/php-fpm.conf > /dev/null
-location ~ \.php\$ {
-    include snippets/fastcgi-php.conf;
-    fastcgi_pass unix:/var/run/php/php$php_version-fpm.sock;
-    fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
-    include fastcgi_params;
-}
-EOF
         sudo mkdir -p /etc/nginx/snippets
-        print_success "PHP-FPM configured for Nginx. Include 'snippets/php-fpm.conf' in your server blocks."
+        for ver in "${selected_versions[@]}"; do
+            sudo tee /etc/nginx/snippets/php$ver-fpm.conf > /dev/null << NGINXEOF
+location ~ \\.php\$ {
+    include snippets/fastcgi-php.conf;
+    fastcgi_pass unix:/var/run/php/php$ver-fpm.sock;
+}
+NGINXEOF
+        done
+        sudo systemctl restart nginx
     fi
     
-    php_ini_file="/etc/php/$php_version/fpm/php.ini"
-    php_fpm_file="/etc/php/$php_version/fpm/pool.d/www.conf"
-    
-    print_step "Configuring PHP settings..."
-    update_php_config "upload_max_filesize" "64M" "$php_ini_file"
-    update_php_config "post_max_size" "64M" "$php_ini_file"
-    update_php_config "memory_limit" "256M" "$php_ini_file"
-    update_php_config "max_execution_time" "600" "$php_ini_file"
-    update_php_config "max_input_time" "600" "$php_ini_file"
-    update_php_config "max_input_vars" "10000" "$php_ini_file"
-    
-    add_php_extension "opcache.so" "$php_ini_file"
-    
-    update_php_config "opcache.enable" "1" "$php_ini_file"
-    update_php_config "opcache.enable_cli" "1" "$php_ini_file"
-    update_php_config "opcache.memory_consumption" "128" "$php_ini_file"
-    update_php_config "opcache.interned_strings_buffer" "8" "$php_ini_file"
-    update_php_config "opcache.max_accelerated_files" "10000" "$php_ini_file"
-    update_php_config "opcache.revalidate_freq" "2" "$php_ini_file"
-    update_php_config "opcache.fast_shutdown" "1" "$php_ini_file"
-    
-    update_php_config "pm" "dynamic" "$php_fpm_file"
-    update_php_config "pm.max_children" "6" "$php_fpm_file"
-    update_php_config "pm.start_servers" "2" "$php_fpm_file"
-    update_php_config "pm.min_spare_servers" "1" "$php_fpm_file"
-    update_php_config "pm.max_spare_servers" "3" "$php_fpm_file"
-    
-    sudo systemctl restart php$php_version-fpm
-    [ "$INSTALL_APACHE" = true ] && sudo systemctl restart apache2
-    [ "$INSTALL_NGINX" = true ] && sudo systemctl restart nginx
-    
-    print_success "PHP $php_version installed successfully!"
+    # Summary
+    echo ""
+    print_header "PHP Installation Complete"
+    echo -e "${CYAN}Installed versions:${NC}"
+    for ver in "${selected_versions[@]}"; do
+        echo "  - PHP $ver (socket: /var/run/php/php$ver-fpm.sock)"
+    done
+    echo -e "${YELLOW}Default CLI:${NC} PHP $php_version"
+    if [ ${#selected_versions[@]} -gt 1 ]; then
+        echo -e "${YELLOW}Switch CLI:${NC} sudo php-switch <version>"
+    fi
+    print_success "PHP installation completed!"
 }
 
 install_mongodb() {
