@@ -1233,30 +1233,35 @@ install_php_mongodb_extension() {
     
     print_step "Installing PHP MongoDB extension for ${#installed_php_versions[@]} PHP version(s)..."
     
-    # Install the MongoDB extension via PECL (only needs to be done once)
-    # Use the default/first PHP version for PECL
-    sudo NEEDRESTART_MODE=a printf "\n" | pecl install -f mongodb 2>/dev/null || true
-    
-    # Add extension to all PHP versions
+    # Install MongoDB extension for each PHP version using apt packages (preferred method)
+    # This handles different extension directories automatically
     for ver in "${installed_php_versions[@]}"; do
-        print_step "Configuring MongoDB extension for PHP $ver..."
+        print_step "Installing MongoDB extension for PHP $ver..."
         
-        # Add to FPM php.ini if exists
-        if [ -f "/etc/php/$ver/fpm/php.ini" ]; then
-            add_php_extension "mongodb.so" "/etc/php/$ver/fpm/php.ini"
-        fi
-        
-        # Add to CLI php.ini if exists
-        if [ -f "/etc/php/$ver/cli/php.ini" ]; then
-            add_php_extension "mongodb.so" "/etc/php/$ver/cli/php.ini"
-        fi
-        
-        # Also add to mods-available for proper module management
-        local mods_dir="/etc/php/$ver/mods-available"
-        if [ -d "$mods_dir" ] && [ ! -f "$mods_dir/mongodb.ini" ]; then
-            echo "extension=mongodb.so" | sudo tee "$mods_dir/mongodb.ini" > /dev/null
-            # Enable the module using phpenmod if available
-            sudo phpenmod -v "$ver" mongodb 2>/dev/null || true
+        # Try to install via apt package first (from ondrej/php PPA)
+        if sudo apt-get install -y "php$ver-mongodb" 2>/dev/null; then
+            print_success "PHP $ver MongoDB extension installed via apt"
+        else
+            # Fallback: compile with PECL for this specific PHP version
+            print_warning "php$ver-mongodb package not available, compiling with PECL..."
+            
+            # Install dev package for this PHP version if not present
+            sudo apt-get install -y "php$ver-dev" 2>/dev/null || true
+            
+            # Use update-alternatives to switch to this PHP version for PECL
+            sudo update-alternatives --set php "/usr/bin/php$ver" 2>/dev/null || true
+            sudo update-alternatives --set php-config "/usr/bin/php-config$ver" 2>/dev/null || true
+            sudo update-alternatives --set phpize "/usr/bin/phpize$ver" 2>/dev/null || true
+            
+            # Install via PECL
+            sudo NEEDRESTART_MODE=a printf "\n" | pecl install -f mongodb 2>/dev/null || true
+            
+            # Add extension configuration
+            local mods_dir="/etc/php/$ver/mods-available"
+            if [ -d "$mods_dir" ] && [ ! -f "$mods_dir/mongodb.ini" ]; then
+                echo "extension=mongodb.so" | sudo tee "$mods_dir/mongodb.ini" > /dev/null
+                sudo phpenmod -v "$ver" mongodb 2>/dev/null || true
+            fi
         fi
         
         # Restart PHP-FPM for this version
@@ -1264,6 +1269,11 @@ install_php_mongodb_extension() {
             sudo systemctl restart "php$ver-fpm"
         fi
     done
+    
+    # Restore default PHP version if php_version is set
+    if [ -n "$php_version" ]; then
+        sudo update-alternatives --set php "/usr/bin/php$php_version" 2>/dev/null || true
+    fi
     
     print_success "MongoDB PHP extension installed for: ${installed_php_versions[*]}"
 }
